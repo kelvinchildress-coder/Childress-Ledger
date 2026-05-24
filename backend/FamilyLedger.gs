@@ -150,7 +150,18 @@ function loadAll_() {
     if (obj.lastModified > maxModified) maxModified = obj.lastModified;
     return obj;
   }).filter(t => t.id);
-  return { tasks: out, lastModified: maxModified };
+  // Also surface the household roster so the PWA can sync names/emails
+  // across all devices from a single source of truth (the Sheet's Settings tab).
+  const householdSettings = getSettings_();
+  return {
+    tasks: out,
+    lastModified: maxModified,
+    settings: {
+      parentNames:  householdSettings.parentNames  || [],
+      kidNames:     householdSettings.kidNames     || [],
+      parentEmails: householdSettings.parentEmails || [],
+    },
+  };
 }
 
 function saveAll_(data) {

@@ -9,7 +9,7 @@ import {
   weeklyLeaderboard, personalDailyStreak,
 } from "./identity.js";
 import {
-  suggestTaskMetadata, weeklyRetrospective, staleTaskAdvice, parseDeadline,
+  suggestTaskMetadata, weeklyRetrospective, staleTaskAdvice, parseDeadline, brainstormTasks,
 } from "./ai.js";
 import {
   loadEventLog, appendEvent, rerankByUsage,
@@ -26,7 +26,7 @@ import {
   CalendarDays, ReceiptText, PartyPopper, ClipboardList,
   Settings as SettingsIcon, Cloud, CloudOff, Bell, BellOff,
   Wand2, TrendingUp, TrendingDown, Trophy, RefreshCw, ChevronDown,
-  Brain, Lightbulb, ArrowRight,
+  Brain, Lightbulb, ArrowRight, MessageCircle, Send,
 } from "lucide-react";
 
 /* CONSTANTS */
@@ -280,6 +280,23 @@ export default function FamilyLedger() {
             setSyncStatus("ok");
             setSyncError(null);
             await persistLocal(migrated);
+            // Sync household roster from the Sheet (source of truth for names/emails).
+            if (r.data.settings) {
+              const rs = r.data.settings;
+              const hasRoster = (rs.parentNames && rs.parentNames.length > 0)
+                             || (rs.kidNames && rs.kidNames.length > 0)
+                             || (rs.parentEmails && rs.parentEmails.length > 0);
+              if (hasRoster) {
+                const merged = {
+                  ...s,
+                  parentNames:  rs.parentNames  && rs.parentNames.length  > 0 ? rs.parentNames  : s.parentNames,
+                  kidNames:     rs.kidNames     && rs.kidNames.length     > 0 ? rs.kidNames     : s.kidNames,
+                  parentEmails: rs.parentEmails && rs.parentEmails.length > 0 ? rs.parentEmails : s.parentEmails,
+                };
+                setSettings(merged);
+                try { await storage.set(SETTINGS_KEY, JSON.stringify(merged)); } catch (e) {}
+              }
+            }
             setLoading(false);
             return;
           }
@@ -567,6 +584,16 @@ export default function FamilyLedger() {
         {view === "email" && (
           <EmailPreview tasks={thisWeekTasks} weekRange={getWeekRange()} settings={settings} />
         )}
+        {view === "brainstorm" && (
+          <BrainstormView
+            household={{ parentNames: settings.parentNames, kidNames: settings.kidNames }}
+            aiCfg={aiCfg}
+            categories={CATEGORIES}
+            frequencies={FREQUENCIES}
+            assigneeOptions={assigneeOptions}
+            onAddTask={upsertTask}
+          />
+        )}
         {view === "insights" && (
           <InsightsView tasks={tasks} events={events} aiCfg={aiCfg} identity={identity} settings={settings} />
         )}
@@ -639,11 +666,12 @@ function IdentityPicker({ settings, onPick, onSkip }) {
 function Header({ view, setView, weekRange, completedCount, totalCount, syncStatus, syncError, backendUrl, backendConfigured, identity }) {
   const weekLabel = weekRange.start.toLocaleDateString(undefined, { month: "long", day: "numeric" }) + " - " + weekRange.end.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   const navItems = [
-    { id: "dashboard", label: "This Week",    icon: Home },
-    { id: "all",       label: "All Tasks",    icon: List },
-    { id: "insights",  label: "Insights",     icon: Brain },
-    { id: "email",     label: "Sunday Email", icon: Mail },
-    { id: "settings",  label: "Settings",     icon: SettingsIcon },
+    { id: "dashboard",  label: "This Week",    icon: Home },
+    { id: "all",        label: "All Tasks",    icon: List },
+    { id: "brainstorm", label: "Brainstorm",   icon: MessageCircle },
+    { id: "insights",   label: "Insights",     icon: Brain },
+    { id: "email",      label: "Sunday Email", icon: Mail },
+    { id: "settings",   label: "Settings",     icon: SettingsIcon },
   ];
   const pct = totalCount === 0 ? 0 : Math.round((completedCount / totalCount) * 100);
   return (
@@ -1650,6 +1678,199 @@ function Settings({ settings, onSave, identity, onResetIdentity, backendUrl, sha
   );
 }
 
+/* BRAINSTORM CHAT */
+function BrainstormView({ household, aiCfg, categories, frequencies, assigneeOptions, onAddTask }) {
+  const [conversation, setConversation] = useState([
+    { role: "assistant", content: "Hi! Tell me what you're planning - a project, an event, a new routine, a season change, anything - and I'll help turn it into a clean list of tasks for the ledger. What's on your mind?" },
+  ]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [proposed, setProposed] = useState([]);
+  const [error, setError] = useState(null);
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [conversation, busy]);
+
+  const send = async () => {
+    if (!input.trim() || busy) return;
+    if (!aiCfg.enabled) {
+      setError("Enable the AI agent in Settings > AI agent first. (And make sure ANTHROPIC_API_KEY is in your Apps Script Script Properties.)");
+      return;
+    }
+    setError(null);
+    const userMsg = { role: "user", content: input.trim() };
+    const next = [...conversation, userMsg];
+    setConversation(next);
+    setInput("");
+    setBusy(true);
+
+    const r = await brainstormTasks({
+      backendUrl: aiCfg.backendUrl, sharedSecret: aiCfg.sharedSecret,
+      conversation: next, household, categories, frequencies,
+    });
+    setBusy(false);
+
+    if (!r || r.error) {
+      setError((r && r.error && r.error.message) || "AI couldn't respond. Try again.");
+      return;
+    }
+    const replyParts = [r.reply || "Got it."];
+    if (r.followUp) replyParts.push(r.followUp);
+    setConversation([...next, { role: "assistant", content: replyParts.join("\n\n") }]);
+
+    if (r.proposedTasks && r.proposedTasks.length > 0) {
+      const stamped = r.proposedTasks.map((t, i) => ({
+        ...t,
+        _id: "p_" + Date.now() + "_" + i,
+        _selected: true,
+      }));
+      setProposed(prev => [...prev, ...stamped]);
+    }
+  };
+
+  const toggleSelect = (id) => setProposed(ps => ps.map(p => p._id === id ? { ...p, _selected: !p._selected } : p));
+  const updateProposed = (id, patch) => setProposed(ps => ps.map(p => p._id === id ? { ...p, ...patch } : p));
+  const removeProposed = (id) => setProposed(ps => ps.filter(p => p._id !== id));
+  const addSelected = () => {
+    const toAdd = proposed.filter(p => p._selected);
+    if (toAdd.length === 0) return;
+    toAdd.forEach(p => {
+      const { _id, _selected, reasoning, ...task } = p;
+      onAddTask(task);
+    });
+    setProposed(ps => ps.filter(p => !p._selected));
+    setConversation(c => [...c, {
+      role: "assistant",
+      content: "Added " + toAdd.length + " task" + (toAdd.length === 1 ? "" : "s") + " to the ledger. Want to brainstorm more, or are we good?",
+    }]);
+  };
+
+  return (
+    <div>
+      <div style={styles.sectionHeader}>
+        <div>
+          <h2 style={styles.sectionTitle}>Brainstorm with AI</h2>
+          <p style={{ color: "#6B6B6B", fontSize: 14, margin: "4px 0 0" }}>
+            Describe what you're planning. I'll ask follow-ups and propose a task list with category, frequency, and priority pre-filled.
+          </p>
+        </div>
+      </div>
+
+      <div style={styles.brainstormCard}>
+        <div ref={scrollRef} style={styles.chatScroll}>
+          {conversation.map((m, i) => (
+            <div key={i} style={{ ...styles.chatBubble, ...(m.role === "user" ? styles.chatBubbleUser : styles.chatBubbleAi) }}>
+              {m.role === "assistant" && <Sparkles size={12} color="#C9603C" style={{ marginRight: 6, marginTop: 3, flexShrink: 0 }} />}
+              <div style={{ flex: 1, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{m.content}</div>
+            </div>
+          ))}
+          {busy && (
+            <div style={{ ...styles.chatBubble, ...styles.chatBubbleAi }}>
+              <Sparkles size={12} color="#C9603C" style={{ marginRight: 6, marginTop: 3 }} />
+              <div style={{ flex: 1, fontStyle: "italic", color: "#8A8579" }}>thinking...</div>
+            </div>
+          )}
+        </div>
+
+        {error && (
+          <div style={{ ...styles.errorBanner, margin: "12px 0 0" }}>
+            <AlertCircle size={16} /> {error}
+          </div>
+        )}
+
+        <div style={styles.chatInputRow}>
+          <input value={input} onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+            placeholder='e.g. "We are moving into a new house next month"'
+            style={{ ...styles.input, flex: 1 }} disabled={busy} />
+          <button onClick={send} style={styles.primaryBtn} disabled={busy || !input.trim()}>
+            <Send size={14} /> Send
+          </button>
+        </div>
+      </div>
+
+      {proposed.length > 0 && (
+        <div style={{ ...styles.formCard, marginTop: 24 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 12 }}>
+            <h3 style={{ ...styles.categoryTitle, margin: 0 }}>
+              Proposed tasks ({proposed.filter(p => p._selected).length} of {proposed.length} selected)
+            </h3>
+            <button style={styles.primaryBtn} onClick={addSelected} disabled={!proposed.some(p => p._selected)}>
+              <Check size={14} /> Add selected to ledger
+            </button>
+          </div>
+          {proposed.map(p => (
+            <ProposedTaskCard key={p._id} task={p}
+              categories={categories} frequencies={frequencies} assigneeOptions={assigneeOptions}
+              onToggle={() => toggleSelect(p._id)}
+              onChange={(patch) => updateProposed(p._id, patch)}
+              onRemove={() => removeProposed(p._id)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProposedTaskCard({ task, categories, frequencies, assigneeOptions, onToggle, onChange, onRemove }) {
+  const [editing, setEditing] = useState(false);
+  return (
+    <div style={{ ...styles.proposedCard, opacity: task._selected ? 1 : 0.55 }}>
+      <input type="checkbox" checked={!!task._selected} onChange={onToggle} style={{ marginTop: 6 }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {!editing ? (
+          <>
+            <div style={{ fontWeight: 600, color: "#1B2C3A", marginBottom: 4 }}>{task.title}</div>
+            {task.details && <div style={{ fontSize: 13, color: "#6B6B6B", marginBottom: 6 }}>{task.details}</div>}
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 12, color: "#8A8579" }}>
+              <span>{task.assignedTo}</span>
+              <span>· {task.frequency}</span>
+              <span>· {task.priority}</span>
+              <span>· {task.category}</span>
+              {task.deadline && <span>· due {task.deadline}</span>}
+            </div>
+            {task.reasoning && (
+              <div style={{ fontSize: 11, color: "#C9603C", marginTop: 6, fontStyle: "italic" }}>{task.reasoning}</div>
+            )}
+          </>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <input value={task.title} onChange={(e) => onChange({ title: e.target.value })} style={{ ...styles.input, gridColumn: "1 / -1" }} />
+            <textarea value={task.details || ""} onChange={(e) => onChange({ details: e.target.value })}
+              rows={2} style={{ ...styles.input, gridColumn: "1 / -1", fontFamily: "inherit", resize: "vertical" }} />
+            <select value={task.category} onChange={(e) => onChange({ category: e.target.value })} style={styles.input}>
+              {categories.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+            </select>
+            <select value={task.frequency} onChange={(e) => onChange({ frequency: e.target.value })} style={styles.input}>
+              {frequencies.map(f => <option key={f.id} value={f.id}>{f.label}</option>)}
+            </select>
+            <select value={task.assignedTo} onChange={(e) => onChange({ assignedTo: e.target.value })} style={styles.input}>
+              {assigneeOptions.map(a => <option key={a} value={a}>{a}</option>)}
+            </select>
+            <select value={task.priority} onChange={(e) => onChange({ priority: e.target.value })} style={styles.input}>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+            <input type="date" value={task.deadline || ""} onChange={(e) => onChange({ deadline: e.target.value || null })}
+              style={{ ...styles.input, gridColumn: "1 / -1" }} />
+          </div>
+        )}
+      </div>
+      <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+        <button style={styles.iconBtn} onClick={() => setEditing(e => !e)} title={editing ? "Done editing" : "Edit"}>
+          {editing ? <Check size={14} /> : <Edit2 size={14} />}
+        </button>
+        <button style={{ ...styles.iconBtn, color: "#A04848" }} onClick={onRemove} title="Reject">
+          <X size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* CELEBRATION */
 function Celebration({ data }) {
   const isKid = !!data.isKid;
@@ -1821,6 +2042,14 @@ const styles = {
   retroSection: { fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "#8A8579", fontWeight: 600, marginBottom: 6 },
   retroBullet: { fontSize: 14, color: "#1B2C3A", lineHeight: 1.5, marginBottom: 4 },
   retroSuggestion: { display: "flex", alignItems: "center", gap: 6, padding: 12, backgroundColor: "#FAEFEA", borderRadius: 3, color: "#1B2C3A", fontSize: 14, marginTop: 12 },
+  brainstormCard: { backgroundColor: "#FFFFFF", border: "1px solid #E5DFD3", borderRadius: 4, padding: 18, display: "flex", flexDirection: "column", gap: 12 },
+  chatScroll: { maxHeight: 480, minHeight: 280, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: 4 },
+  chatBubble: { display: "flex", alignItems: "flex-start", padding: "10px 14px", borderRadius: 12, maxWidth: "85%", fontSize: 14, lineHeight: 1.5 },
+  chatBubbleUser: { alignSelf: "flex-end", backgroundColor: "#1B2C3A", color: "#FAF7F2", borderBottomRightRadius: 4 },
+  chatBubbleAi:   { alignSelf: "flex-start", backgroundColor: "#F2EDE4", color: "#1B2C3A", borderBottomLeftRadius: 4 },
+  chatInputRow: { display: "flex", gap: 8, alignItems: "stretch", paddingTop: 12, borderTop: "1px solid #F0EAE0" },
+  proposedCard: { display: "flex", alignItems: "flex-start", gap: 12, padding: "12px 14px", borderTop: "1px solid #F0EAE0", transition: "opacity 0.15s" },
+
   celebrationOverlay: { position: "fixed", inset: 0, pointerEvents: "none", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center" },
   celebrationBox: { position: "absolute", left: "50%", top: "50%", display: "flex", alignItems: "center", gap: 16, padding: "20px 28px", backgroundColor: "#FAF7F2", border: "2px solid #C9603C", borderRadius: 8, boxShadow: "0 20px 50px rgba(27,44,58,0.18)" },
   celebrationMilestone: { padding: "28px 40px", background: "linear-gradient(135deg, #FAF7F2 0%, #FAEFEA 100%)" },

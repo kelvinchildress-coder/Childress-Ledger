@@ -7,22 +7,45 @@
  *   - power per-person streaks
  *   - drive the kid-themed celebration overlay
  *   - personalize the dashboard greeting
- *
- * Identity record:
- *   { id, name, role: "parent" | "kid", emoji, createdAt }
  */
 
 import { storage } from "./storage.js";
 
 const IDENTITY_KEY = "family_ledger_identity_v1";
 
-const KID_EMOJI = ["🦊", "🦄", "🐢", "🦖", "🐙", "🦋", "🐝", "🦔", "🦉", "🐼", "🦁", "🐧"];
+// Hard-wired emojis for the Childress household. Add new family members here.
+// Lookups are case-insensitive on first name.
+const NAME_EMOJI = {
+  "kelvin":   "\u{1F3C8}",  // 🏈 football — Nebraska Cornhuskers
+  "enrique":  "\u{1F1F2}\u{1F1F9}",  // 🇲🇹 Maltese flag
+  "andie":    "\u{1F3D0}",  // 🏐 volleyball (closest Unicode to beach volleyball)
+  "noa":      "\u{1F370}",  // 🍰 piece of cake
+};
+
+const KID_EMOJI    = ["🦊", "🦄", "🐢", "🦖", "🐙", "🦋", "🐝", "🦔", "🦉", "🐼", "🦁", "🐧"];
 const PARENT_EMOJI = ["📒", "✒️", "📓", "🗂️", "📚"];
+
+/** Look up a custom emoji for a name; returns null if no match. */
+export function customEmojiFor(name) {
+  if (!name) return null;
+  const key = String(name).trim().toLowerCase();
+  return NAME_EMOJI[key] || null;
+}
 
 export async function loadIdentity() {
   try {
     const res = await storage.get(IDENTITY_KEY);
-    return res?.value ? JSON.parse(res.value) : null;
+    if (!res?.value) return null;
+    const parsed = JSON.parse(res.value);
+    // Live-refresh emoji if there's a custom mapping for this name.
+    // This means existing saved identities get the new emoji on next load
+    // without forcing the user to re-pick.
+    const custom = customEmojiFor(parsed.name);
+    if (custom && parsed.emoji !== custom) {
+      parsed.emoji = custom;
+      try { await storage.set(IDENTITY_KEY, JSON.stringify(parsed)); } catch {}
+    }
+    return parsed;
   } catch {
     return null;
   }
@@ -47,8 +70,10 @@ export async function clearIdentity() {
 }
 
 export function makeIdentity({ name, role }) {
+  // Custom emoji takes precedence over the random-from-pool fallback.
+  const custom = customEmojiFor(name);
   const pool = role === "kid" ? KID_EMOJI : PARENT_EMOJI;
-  const emoji = pool[Math.floor(Math.random() * pool.length)];
+  const emoji = custom || pool[Math.floor(Math.random() * pool.length)];
   return {
     id:
       "id_" +
@@ -73,7 +98,6 @@ export function flattenCompletions(tasks, start, end) {
       const d = new Date(entry.date);
       if (d >= start && d <= end) out.push({ ...entry, taskId: t.id, title: t.title });
     });
-    // back-compat: tasks with only completionHistory (no log) attribute to "Family"
     if (!t.completionLog) {
       (t.completionHistory || []).forEach((iso) => {
         const d = new Date(iso);
