@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" fill="#FAF7F2"/>
+  <rect x="4" y="4" width="56" height="56" fill="none" stroke="#1B2C3A" stroke-width="2"/>
+  <rect x="8" y="8" width="48" height="48" fill="none" stroke="#C9603C" stroke-width="1"/>
+  <text x="50%" y="56%" font-family="Georgia, serif" font-weight="bold" font-size="42"
+        text-anchor="middle" fill="#1B2C3A" dominant-baseline="middle">L</text>
+</svg>
