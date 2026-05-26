@@ -418,6 +418,31 @@ export default function FamilyLedger() {
     setEditingTask(null);
   }
 
+  // Batch version of upsertTask. Use this when adding multiple tasks from
+  // a single user action (e.g. Brainstorm "Add selected to ledger"). Calling
+  // upsertTask in a loop hits a stale-closure bug because each iteration
+  // reads the same tasks snapshot and React batches the setState calls,
+  // so only the last task survives. This function builds one next array
+  // with all new tasks and calls persist() exactly once.
+  function upsertTasks(tasksArray) {
+    if (!Array.isArray(tasksArray) || tasksArray.length === 0) return;
+    const stamp = Date.now();
+    const created = tasksArray.map((td, i) => ({
+      completionHistory: [], completionLog: [], snoozedUntil: null, lastCompleted: null,
+      ...td,
+      id: td.id || "task_" + stamp + "_" + i + "_" + Math.random().toString(36).slice(2,5),
+      createdAt: stamp, lastModified: stamp,
+    }));
+    const next = [...tasks, ...created];
+    Promise.all(created.map(c => appendEvent({
+      kind: "quick-add", taskId: c.id, meta: {
+        title: c.title, category: c.category,
+        frequency: c.frequency, assignedTo: c.assignedTo,
+      },
+    }))).then(loadEventLog).then(setEvents).catch(() => {});
+    persist(next);
+  }
+
   function deleteTask(id) {
     appendEvent({ kind: "delete", taskId: id }).then(loadEventLog).then(setEvents);
     persist(tasks.filter(t => t.id !== id));
@@ -606,6 +631,7 @@ export default function FamilyLedger() {
             frequencies={FREQUENCIES}
             assigneeOptions={assigneeOptions}
             onAddTask={upsertTask}
+            onAddTasks={upsertTasks}
           />
         )}
         {view === "insights" && (
@@ -1693,7 +1719,7 @@ function Settings({ settings, onSave, identity, onResetIdentity, backendUrl, sha
 }
 
 /* BRAINSTORM CHAT */
-function BrainstormView({ household, aiCfg, categories, frequencies, assigneeOptions, onAddTask }) {
+function BrainstormView({ household, aiCfg, categories, frequencies, assigneeOptions, onAddTask, onAddTasks }) {
   const [conversation, setConversation] = useState([
     { role: "assistant", content: "Hi! Tell me what you're planning - a project, an event, a new routine, a season change, anything - and I'll help turn it into a clean list of tasks for the ledger. What's on your mind?" },
   ]);
@@ -1750,10 +1776,17 @@ function BrainstormView({ household, aiCfg, categories, frequencies, assigneeOpt
   const addSelected = () => {
     const toAdd = proposed.filter(p => p._selected);
     if (toAdd.length === 0) return;
-    toAdd.forEach(p => {
+const stripped = toAdd.map(p => {
       const { _id, _selected, reasoning, ...task } = p;
-      onAddTask(task);
+      return task;
     });
+    if (typeof onAddTasks === "function") {
+      onAddTasks(stripped);
+    } else {
+      // Fallback if parent didn't pass onAddTasks — adds will be lossy
+      // (stale-closure bug), but at least one task lands.
+      stripped.forEach(task => onAddTask(task));
+    }
     setProposed(ps => ps.filter(p => !p._selected));
     setConversation(c => [...c, {
       role: "assistant",
