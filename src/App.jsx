@@ -1473,7 +1473,7 @@ function InsightsView({ tasks, events, aiCfg, identity, settings }) {
 
 /* SETTINGS */
 function Settings({ settings, onSave, identity, onResetIdentity, backendUrl, sharedSecret, envBackendUrl }) {
-  const [draft, setDraft] = useState(settings);
+  const [draft, setDraft] = useState({ ...settings, backendUrl: settings.backendUrl || envBackendUrl });
   const [saved, setSaved] = useState(false);
   const [testStatus, setTestStatus] = useState(null);
   const [testError, setTestError] = useState(null);
