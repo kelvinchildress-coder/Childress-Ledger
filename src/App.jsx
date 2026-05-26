@@ -274,6 +274,20 @@ export default function FamilyLedger() {
           setSyncStatus("syncing");
           const r = await loadFromBackend(backendUrl, sharedSecret);
           if (r.ok && r.data && r.data.tasks) {
+            // First-run auto-persist: if backendUrl/sharedSecret are currently
+            // coming from the build-time env vars (not user-saved), promote
+            // them to IndexedDB now that we've confirmed the URL works. Without
+            // this, users would have to manually open Settings + Save on every
+            // new device for cross-device sync to function.
+            if ((!s.backendUrl && ENV_BACKEND_URL) || (!s.sharedSecret && ENV_SHARED_SECRET)) {
+              s = {
+                ...s,
+                backendUrl:   s.backendUrl   || ENV_BACKEND_URL,
+                sharedSecret: s.sharedSecret || ENV_SHARED_SECRET,
+              };
+              setSettings(s);
+              try { await storage.set(SETTINGS_KEY, JSON.stringify(s)); } catch (e) {}
+            }
             const migrated = migrate(r.data.tasks);
             setTasks(migrated);
             remoteSnapshotRef.current = migrated;
@@ -1720,7 +1734,7 @@ function BrainstormView({ household, aiCfg, categories, frequencies, assigneeOpt
     if (r.followUp) replyParts.push(r.followUp);
     setConversation([...next, { role: "assistant", content: replyParts.join("\n\n") }]);
 
-    if (r.proposedTasks && r.proposedTasks.length > 0) {
+    if (Array.isArray(r.proposedTasks) && r.proposedTasks.length > 0) {
       const stamped = r.proposedTasks.map((t, i) => ({
         ...t,
         _id: "p_" + Date.now() + "_" + i,
