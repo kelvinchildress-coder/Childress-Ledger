@@ -24,15 +24,66 @@ function getCached(key) {
 function setCached(key, value) {
   CACHE.set(key, { value, ts: Date.now() });
 }
+
+/**
+ * Robustly extract a JSON object from model output. Tries, in order:
+ *   1. A fenced ```json ... ``` block (most strict, what the prompt asks for).
+ *   2. The entire text trimmed.
+ *   3. The largest {...} substring (salvages "Sure! Here's the JSON: {...}").
+ * Returns the parsed object, or null if nothing works.
+ */
 function tryParseJson(text) {
   if (!text) return null;
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const body = fenced ? fenced[1] : text;
-  try {
-    return JSON.parse(body.trim());
-  } catch {
-    return null;
+  const fenced = text.match(/```(?:json)?s*([sS]*?)```/);
+  if (fenced) {
+    try { return JSON.parse(fenced[1].trim()); } catch {}
   }
+  try { return JSON.parse(text.trim()); } catch {}
+  const first = text.indexOf("{");
+  const last  = text.lastIndexOf("}");
+  if (first >= 0 && last > first) {
+    try { return JSON.parse(text.slice(first, last + 1)); } catch {}
+  }
+  return null;
+}
+
+/**
+ * Coerce a brainstorm AI response into a guaranteed shape. Silently drops
+ * tasks with bad/missing titles, and snaps enum fields (category, frequency,
+ * priority, assignedTo) to allowed values so a slightly-off model response
+ * still produces usable tasks instead of a crash.
+ */
+function normalizeBrainstormResponse(parsed, { categories, frequencies, assignees }) {
+  const empty = { reply: "I got a response but couldn't read it. Try rephrasing?", proposedTasks: [], followUp: null, done: false };
+  if (!parsed || typeof parsed !== "object") return empty;
+
+  const categoryIds  = categories.map(c => c.id);
+  const frequencyIds = frequencies.map(f => f.id);
+  const defaultCategory  = categoryIds[0]  || "house-care";
+  const defaultFrequency = frequencyIds[0] || "weekly";
+  const defaultAssignee  = assignees.includes("Family") ? "Family" : (assignees[0] || "Anyone");
+  const validPriorities  = ["high", "medium", "low"];
+
+  const rawTasks = Array.isArray(parsed.proposedTasks) ? parsed.proposedTasks : [];
+  const proposedTasks = rawTasks
+    .filter(t => t && typeof t === "object" && typeof t.title === "string" && t.title.trim())
+    .map(t => ({
+      title:      String(t.title).trim(),
+      category:   categoryIds.includes(t.category)   ? t.category   : defaultCategory,
+      frequency:  frequencyIds.includes(t.frequency) ? t.frequency  : defaultFrequency,
+      priority:   validPriorities.includes(t.priority) ? t.priority : "medium",
+      assignedTo: assignees.includes(t.assignedTo)   ? t.assignedTo : defaultAssignee,
+      deadline:   typeof t.deadline === "string" && /^d{4}-d{2}-d{2}$/.test(t.deadline) ? t.deadline : null,
+      details:    typeof t.details   === "string" ? t.details   : "",
+      reasoning:  typeof t.reasoning === "string" ? t.reasoning : "",
+    }));
+
+  return {
+    reply:    typeof parsed.reply    === "string" && parsed.reply.trim()    ? parsed.reply.trim()    : "Here's what I came up with.",
+    proposedTasks,
+    followUp: typeof parsed.followUp === "string" && parsed.followUp.trim() ? parsed.followUp.trim() : null,
+    done:     parsed.done === true,
+  };
 }
 
 /** Auto-categorise a new task from its title. */
@@ -71,8 +122,8 @@ export async function weeklyRetrospective({ backendUrl, sharedSecret, snapshot }
   const system =
     "You're a warm, concise family-operations coach. Look at this week's task data and reply with STRICT JSON: " +
     `{"wins":["..."], "drift":["..."], "suggestion":"..."}. ` +
-    "`wins` are 1-3 positive observations. `drift` are 1-3 things that slipped or look at risk. " +
-    "`suggestion` is one concrete improvement the family could try next week. Keep each item under 110 chars.";
+    "wins are 1-3 positive observations. drift are 1-3 things that slipped or look at risk. " +
+    "suggestion is one concrete improvement the family could try next week. Keep each item under 110 chars.";
 
   const res = await callAiAgent(backendUrl, {
     system,
@@ -160,24 +211,24 @@ export async function brainstormTasks({ backendUrl, sharedSecret, conversation, 
     "7. Priorities: \"high\" only for safety/legal/financial-deadline things, \"medium\" default, \"low\" for nice-to-haves.\n\n" +
     "Output STRICT JSON only, no prose outside the JSON:\n" +
     `{
-      "reply": "natural conversational response, 1-3 sentences",
-      "proposedTasks": [
-        {
-          "title": "short imperative",
-          "category": "<one of the category ids>",
-          "frequency": "<one of the frequency ids>",
-          "priority": "high|medium|low",
-          "assignedTo": "<one of the assignees>",
-          "deadline": "YYYY-MM-DD or null",
-          "details": "1-2 sentence helpful detail",
-          "reasoning": "1 sentence why this matters"
-        }
-      ],
-      "followUp": "next question to ask the user, or null when the list feels complete",
-      "done": false
+  "reply": "natural conversational response, 1-3 sentences",
+  "proposedTasks": [
+    {
+      "title": "short imperative",
+      "category": "<one of the category ids>",
+      "frequency": "<one of the frequency ids>",
+      "priority": "high|medium|low",
+      "assignedTo": "<one of the assignees>",
+      "deadline": "YYYY-MM-DD or null",
+      "details": "1-2 sentence helpful detail",
+      "reasoning": "1 sentence why this matters"
     }
-    Set done: true only when the user has explicitly confirmed they're satisfied with the list. ` +
-    `On the first message, proposedTasks should usually be empty and you ask a clarifying question.`;
+  ],
+  "followUp": "next question to ask the user, or null when the list feels complete",
+  "done": false
+}` +
+    "\nSet done: true only when the user has explicitly confirmed they're satisfied with the list." +
+    "\nOn the first message, proposedTasks should usually be empty and you ask a clarifying question.";
 
   // Flatten the conversation into a single user message — Apps Script proxy
   // expects { system, prompt } not full message history.
@@ -193,7 +244,10 @@ export async function brainstormTasks({ backendUrl, sharedSecret, conversation, 
   }, sharedSecret);
 
   if (!res.ok) return { error: res.error };
-  const parsed = tryParseJson(res.data.text || res.data.content || "");
-  if (!parsed) return { error: { kind: "parse", message: "Couldn't parse AI response. Try rephrasing." } };
-  return parsed;
+  const raw = res.data.text || res.data.content || "";
+  const parsed = tryParseJson(raw);
+  if (!parsed) {
+    return { error: { kind: "parse", message: "Couldn't parse AI response. Try rephrasing.", rawSnippet: raw.slice(0, 200) } };
+  }
+  return normalizeBrainstormResponse(parsed, { categories, frequencies, assignees });
 }
