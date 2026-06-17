@@ -416,6 +416,7 @@ export default function FamilyLedger() {
     }
     persist(next);
     setEditingTask(null);
+    setView("dashboard");
   }
 
   // Batch version of upsertTask. Use this when adding multiple tasks from
@@ -745,7 +746,7 @@ function Header({ view, setView, weekRange, completedCount, totalCount, syncStat
       <nav style={styles.nav}>
         {navItems.map(({ id, label, icon: Icon }) => (
           <button key={id} onClick={() => setView(id)}
-            style={{ ...styles.navBtn, ...(view === id ? styles.navBtnActive : {}) }}>
+            style={{ ...styles.navBtn, ...(view === id ? styles.navBtnActive : { borderBottomColor: "transparent" }) }}>
             <Icon size={15} strokeWidth={1.75} /><span>{label}</span>
           </button>
         ))}
@@ -1098,10 +1099,11 @@ function QuickAdd({ onAdd, assigneeOptions, events, aiCfg, categories, frequenci
 
 /* ALL TASKS */
 function AllTasks({ tasks, allTasks, onEdit, onDelete, onAdd, onUnsnooze, onExportICS, filterCategory, setFilterCategory, filterAssignee, setFilterAssignee, assigneeOptions }) {
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   return (
     <div>
       <div style={styles.sectionHeader}>
-        <h2 style={styles.sectionTitle}>Every task ({allTasks.length})</h2>
+        <h2 style={styles.sectionTitle}>Every task ({tasks.length}{tasks.length !== allTasks.length ? ` of ${allTasks.length}` : ""})</h2>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button style={styles.ghostBtn} onClick={onExportICS}><Download size={14} /> Export all (.ics)</button>
           <button style={styles.primaryBtn} onClick={onAdd}><Plus size={16} /> Add task</button>
@@ -1181,10 +1183,17 @@ function AllTasks({ tasks, allTasks, onEdit, onDelete, onAdd, onUnsnooze, onExpo
                     <div style={{ display: "flex", gap: 4 }}>
                       <button style={styles.iconBtn} onClick={() => onEdit(t)}><Edit2 size={13} /></button>
                       <button style={{ ...styles.iconBtn, color: "#A04848" }}
-                        onClick={() => { if (confirm("Delete \"" + t.title + "\"?")) onDelete(t.id); }}>
+                        onClick={() => setConfirmDeleteId(t.id)} style={{ ...(confirmDeleteId === t.id ? { color: "#A04848", fontWeight: 700 } : {}) }}>
                         <Trash2 size={13} />
                       </button>
                     </div>
+                    {confirmDeleteId === t.id && (
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
+                        <span style={{ fontSize: 12, color: "#A04848" }}>Delete this task?</span>
+                        <button style={{ fontSize: 11, padding: "2px 8px", background: "#A04848", color: "#fff", border: "none", borderRadius: 3, cursor: "pointer" }} onClick={() => { onDelete(t.id); setConfirmDeleteId(null); }}>Yes, delete</button>
+                        <button style={{ fontSize: 11, padding: "2px 8px", background: "transparent", border: "1px solid #D9D2C4", borderRadius: 3, cursor: "pointer" }} onClick={() => setConfirmDeleteId(null)}>Cancel</button>
+                      </div>
+                    )}
                   </td>
                 </tr>
               );
@@ -1198,7 +1207,7 @@ function AllTasks({ tasks, allTasks, onEdit, onDelete, onAdd, onUnsnooze, onExpo
 
 /* TASK FORM */
 function TaskForm({ task, onSave, onCancel, assigneeOptions, aiCfg }) {
-  const [form, setForm] = useState(task || {
+  const [form, setForm] = useState(task ? { ...task, deadline: task.deadline ? task.deadline.slice(0, 10) : "" } : {
     title: "", details: "", category: "life-admin", assignedTo: "Anyone",
     frequency: "weekly", deadline: "", priority: "medium",
   });
@@ -1206,7 +1215,12 @@ function TaskForm({ task, onSave, onCancel, assigneeOptions, aiCfg }) {
   const [parseHint, setParseHint] = useState(null);
   const [phrase, setPhrase] = useState("");
   const update = (k, v) => setForm(f => ({ ...f, [k]: v }));
-  const submit = () => { if (!form.title.trim()) return; onSave({ ...form, deadline: form.deadline || null }); };
+  const [titleError, setTitleError] = useState(false);
+  const submit = () => {
+    if (!form.title.trim()) { setTitleError(true); return; }
+    setTitleError(false);
+    onSave({ ...form, deadline: form.deadline || null });
+  };
 
   const parseAndApply = async () => {
     if (!aiCfg || !aiCfg.enabled || !phrase.trim()) return;
@@ -1229,8 +1243,9 @@ function TaskForm({ task, onSave, onCancel, assigneeOptions, aiCfg }) {
       </div>
       <div style={styles.formGrid}>
         <Field label="Title" full>
-          <input value={form.title} onChange={(e) => update("title", e.target.value)}
-            placeholder="e.g. File Q1 sales tax" style={styles.input} />
+          <input value={form.title} onChange={(e) => { update("title", e.target.value); if (e.target.value.trim()) setTitleError(false); }}
+            placeholder="e.g. File Q1 sales tax" style={{ ...styles.input, ...(titleError ? { borderColor: "#A04848", boxShadow: "0 0 0 2px rgba(160,72,72,0.2)" } : {}) }} />
+          {titleError && <div style={{ color: "#A04848", fontSize: 12, marginTop: 4 }}>Title is required</div>}
         </Field>
         <Field label="Details" full>
           <textarea value={form.details} onChange={(e) => update("details", e.target.value)}
@@ -2055,7 +2070,7 @@ const styles = {
   filterGroup: { display: "flex", alignItems: "center", gap: 8 },
   filterLabel: { fontSize: 12, color: "#6B6B6B", fontWeight: 500 },
   select: { padding: "6px 32px 6px 10px", border: "1px solid #D9D2C4", borderRadius: 3, backgroundColor: "#FFFFFF", fontSize: 13, color: "#1B2C3A" },
-  table: { width: "100%", borderCollapse: "collapse", backgroundColor: "#FFFFFF", border: "1px solid #E5DFD3", borderRadius: 4, overflow: "hidden", minWidth: 800 },
+  table: { width: "100%", borderCollapse: "collapse", backgroundColor: "#FFFFFF", border: "1px solid #E5DFD3", borderRadius: 4, overflow: "hidden" },
   tableHeadRow: { backgroundColor: "#F2EDE4" },
   th: { textAlign: "left", padding: "12px 14px", fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "#6B6B6B", fontWeight: 600, borderBottom: "1px solid #E5DFD3", whiteSpace: "nowrap" },
   tableRow: { borderBottom: "1px solid #F0EAE0" },
