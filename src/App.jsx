@@ -910,14 +910,14 @@ function LeaderboardStrip({ allTasks, identity }) {
 /* TASK CARD */
 function renderDetails(text) {
   if (!text) return null;
-  const urlRegex = /(https?://[^s]+)/g;
-  const parts = text.split(urlRegex);
-  return parts.map((part, i) =>
-    urlRegex.test(part)
-      ? <a key={i} href={part} target="_blank" rel="noreferrer noopener"
-          style={{ color: "#C9603C", textDecoration: "underline", wordBreak: "break-all" }}>{part}</a>
-      : part
-  );
+  const words = text.split(/(\s+)/);
+  return words.map((word, i) => {
+    if (word.startsWith("http://") || word.startsWith("https://")) {
+      return <a key={i} href={word} target="_blank" rel="noreferrer noopener"
+        style={{ color: "#C9603C", textDecoration: "underline", wordBreak: "break-all" }}>{word}</a>;
+    }
+    return word;
+  });
 }
 
 function TaskCard({ task, onToggle, onEdit, onSnooze }) {
