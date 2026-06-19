@@ -230,9 +230,113 @@ function migrate(arr) {
   });
 }
 
+/* SEARCH PALETTE */
+function SearchPalette({ tasks, onClose, onEditTask, setView }) {
+  const [q, setQ] = React.useState("");
+  const inputRef = React.useRef();
+  React.useEffect(() => { inputRef.current && inputRef.current.focus(); }, []);
+  React.useEffect(() => {
+    const handler = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+  const results = React.useMemo(() => {
+    if (!q.trim()) return tasks.slice(0, 8);
+    const lq = q.toLowerCase();
+    return tasks.filter(t =>
+      t.title.toLowerCase().includes(lq) ||
+      (t.details || "").toLowerCase().includes(lq) ||
+      (t.category || "").toLowerCase().includes(lq) ||
+      (t.assignedTo || "").toLowerCase().includes(lq)
+    ).slice(0, 12);
+  }, [q, tasks]);
+  const urgency = (t) => {
+    if (!t.deadline) return "";
+    const days = Math.ceil((new Date(t.deadline) - new Date()) / 86400000);
+    if (days <= 3) return "🔴";
+    if (days <= 7) return "🟡";
+    return "🟢";
+  };
+  const overlayStyle = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 9999, display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 80 };
+  const paletteStyle = { background: "#fff", borderRadius: 12, width: "min(560px, 92vw)", boxShadow: "0 20px 60px rgba(0,0,0,0.25)", overflow: "hidden" };
+  const inputStyle = { width: "100%", border: "none", outline: "none", padding: "18px 20px", fontSize: 17, fontFamily: "inherit", borderBottom: "1px solid #e5e5e5", boxSizing: "border-box" };
+  return (
+    <div style={overlayStyle} onClick={onClose}>
+      <div style={paletteStyle} onClick={e => e.stopPropagation()}>
+        <input ref={inputRef} value={q} onChange={e => setQ(e.target.value)} placeholder="Search tasks… (Esc to close)" style={inputStyle} />
+        {results.length === 0 && <div style={{ padding: "16px 20px", color: "#888", fontSize: 14 }}>No tasks found</div>}
+        {results.map((t, i) => (
+          <div key={t.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"11px 20px", cursor:"pointer", background:"#fff", borderBottom:"1px solid #f0f0f0" }} onClick={() => { onEditTask(t); setView("add"); onClose(); }}
+            onMouseEnter={e => e.currentTarget.style.background = "#f8f5f0"}
+            onMouseLeave={e => e.currentTarget.style.background = "#fff"}
+          >
+            <span style={{ flex: 1, fontWeight: 500, fontSize: 15 }}>{urgency(t)} {t.title}</span>
+            <span style={{ fontSize: 12, color: "#888", textTransform: "capitalize" }}>{t.category?.replace(/-/g," ")}</span>
+            {t.completed && <span style={{ fontSize: 11, color: "#4CAF50" }}>✓ done</span>}
+          </div>
+        ))}
+        <div style={{ padding: "8px 20px", color: "#aaa", fontSize: 11, borderTop: "1px solid #f0f0f0" }}>Ctrl+K to open · Click to jump · Esc to close</div>
+      </div>
+    </div>
+  );
+}
+
+/* CALENDAR VIEW */
+function CalendarView({ tasks, onEditTask, setView }) {
+  const today = new Date();
+  const [yr, setYr] = React.useState(today.getFullYear());
+  const [mo, setMo] = React.useState(today.getMonth());
+  const monthStart = new Date(yr, mo, 1);
+  const daysInMonth = new Date(yr, mo+1, 0).getDate();
+  const startDow = monthStart.getDay();
+  const monthName = monthStart.toLocaleString("default", { month:"long", year:"numeric" });
+  const tasksByDay = {};
+  tasks.forEach(t => {
+    if (!t.deadline) return;
+    const d = new Date(t.deadline + "T00:00:00");
+    if (d.getFullYear() === yr && d.getMonth() === mo) {
+      const day = d.getDate();
+      if (!tasksByDay[day]) tasksByDay[day] = [];
+      tasksByDay[day].push(t);
+    }
+  });
+  const cells = [];
+  for (let i=0; i<startDow; i++) cells.push(null);
+  for (let i=1; i<=daysInMonth; i++) cells.push(i);
+  const DOW = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+  const isToday = (d) => d === today.getDate() && yr === today.getFullYear() && mo === today.getMonth();
+  return (
+    <div style={{ maxWidth: 800, margin: "0 auto", padding: "16px 0" }}>
+      <nav style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
+        <button onClick={()=>{ if(mo===0){setMo(11);setYr(y=>y-1);}else setMo(m=>m-1); }} style={{ background:"none", border:"1px solid #ccc", borderRadius:6, padding:"4px 12px", cursor:"pointer" }}>{"<"}</button>
+        <h3 style={{ margin:0, fontSize:18, fontWeight:600 }}>{monthName}</h3>
+        <button onClick={()=>{ if(mo===11){setMo(0);setYr(y=>y+1);}else setMo(m=>m+1); }} style={{ background:"none", border:"1px solid #ccc", borderRadius:6, padding:"4px 12px", cursor:"pointer" }}>{">"}</button>
+      </nav>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:2 }}>
+        {DOW.map(d=><div key={d} style={{ textAlign:"center", fontSize:11, fontWeight:600, color:"#888", padding:"4px 0" }}>{d}</div>)}
+        {cells.map((day, i) => (
+          <div key={i} style={{ minHeight:64, border: day && isToday(day) ? "2px solid #C96038" : "1px solid #e8e4de", borderRadius:6, padding:"4px 5px", background: day && isToday(day) ? "#FFF8F3" : "#fff", fontSize:12 }}>
+            {day && <div style={{ fontWeight: isToday(day)?700:400, color: isToday(day)?"#C96038":"#555", marginBottom:2 }}>{day}</div>}
+            {day && (tasksByDay[day]||[]).map(t=>(
+              <div key={t.id} onClick={()=>{ onEditTask(t); setView("add"); }}
+                style={{ fontSize:10, padding:"1px 4px", borderRadius:3, marginBottom:1, cursor:"pointer", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
+                  background: t.completed ? "#e8f5e9" : "#FFF0E8", color: t.completed ? "#388E3C" : "#C96038", fontWeight:500 }}
+                title={t.title}>
+                {t.completed?"✓ ":""}{t.title}
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+      <p style={{ color:"#888", fontSize:12, marginTop:12, textAlign:"center" }}>Click any task to edit · Showing {Object.values(tasksByDay).flat().length} task(s) with deadlines this month</p>
+    </div>
+  );
+}
+
 /* ROOT */
 export default function FamilyLedger() {
   const [tasks, setTasks] = useState([]);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [identity, setIdentity] = useState(null);
   const [identityReady, setIdentityReady] = useState(false);
@@ -370,6 +474,14 @@ export default function FamilyLedger() {
     }, 60000);
     return () => clearInterval(interval);
   }, [effectiveBackendUrl, effectiveSharedSecret, tasks]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); setSearchOpen(o => !o); }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
 
   async function persistLocal(nextTasks) {
     try { await storage.set(STORAGE_KEY, JSON.stringify({ tasks: nextTasks })); }
@@ -560,6 +672,7 @@ export default function FamilyLedger() {
           backendUrl={effectiveBackendUrl}
           backendConfigured={!!effectiveBackendUrl}
           identity={identity}
+          onSearch={() => setSearchOpen(o => !o)}
         />
 
         {updateReady && (
@@ -647,8 +760,16 @@ export default function FamilyLedger() {
             backendUrl={effectiveBackendUrl} sharedSecret={effectiveSharedSecret}
             envBackendUrl={ENV_BACKEND_URL} />
         )}
+        {view === "calendar" && (
+          <div style={{ padding: "24px 16px" }}>
+            <h2 style={{ fontFamily: "Georgia, serif", fontSize: 26, marginBottom: 4 }}>Calendar</h2>
+            <p style={{ color: "#888", fontSize: 14, marginBottom: 16 }}>Tasks plotted by deadline. Click any task to edit.</p>
+            <CalendarView tasks={tasks} onEditTask={(t) => setEditingTask(t)} setView={setView} />
+          </div>
+        )}
       </div>
       {celebration && <Celebration data={celebration} />}
+      {searchOpen && <SearchPalette tasks={tasks} onClose={() => setSearchOpen(false)} onEditTask={(t) => setEditingTask(t)} setView={setView} />}
     </div>
   );
 }
@@ -706,7 +827,7 @@ function IdentityPicker({ settings, onPick, onSkip }) {
 }
 
 /* HEADER */
-function Header({ view, setView, weekRange, completedCount, totalCount, syncStatus, syncError, backendUrl, backendConfigured, identity }) {
+function Header({ view, setView, weekRange, completedCount, totalCount, syncStatus, syncError, backendUrl, backendConfigured, identity, onSearch }) {
   const weekLabel = weekRange.start.toLocaleDateString(undefined, { month: "long", day: "numeric" }) + " - " + weekRange.end.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   const navItems = [
     { id: "dashboard",  label: "This Week",    icon: Home },
@@ -715,6 +836,7 @@ function Header({ view, setView, weekRange, completedCount, totalCount, syncStat
     { id: "insights",   label: "Insights",     icon: Brain },
     { id: "email",      label: "Sunday Email", icon: Mail },
     { id: "settings",   label: "Settings",     icon: SettingsIcon },
+    { id: "calendar",   label: "Calendar",     icon: Calendar },
   ];
   const pct = totalCount === 0 ? 0 : Math.round((completedCount / totalCount) * 100);
   return (
@@ -724,6 +846,7 @@ function Header({ view, setView, weekRange, completedCount, totalCount, syncStat
           <div style={styles.eyebrow}>
             The Family Ledger · Week of {weekLabel}
             {backendConfigured && <SyncBadge status={syncStatus} error={syncError} backendUrl={backendUrl} />}
+              {onSearch && <button onClick={onSearch} title="Search tasks (Ctrl+K)" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0 6px', opacity: 0.6, fontSize: 16 }}>🔍</button>}
           </div>
           <h1 style={styles.title}>
             <span style={{ fontStyle: "italic", color: "#C9603C" }}>House</span> business.
@@ -980,6 +1103,33 @@ function TaskCard({ task, onToggle, onEdit, onSnooze, onDelete }) {
             • {priorityMeta && priorityMeta.label.toLowerCase()}
           </span>
         </div>
+      {task.subtasks && task.subtasks.length > 0 && (() => {
+        const done = task.subtasks.filter(s=>s.done).length;
+        const total = task.subtasks.length;
+        const pct = Math.round((done/total)*100);
+        return (
+          <div style={{ marginTop: 6, fontSize: 12, color: "#777" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:2 }}>
+              <span>Checklist: {done}/{total}</span><span>{pct}%</span>
+            </div>
+            <div style={{ background:"#e8e4de", borderRadius:4, height:4 }}>
+              <div style={{ background: pct===100?"#4CAF50":"#C96038", width:pct+"%", height:"100%", borderRadius:4 }} />
+            </div>
+          </div>
+        );
+      })()}
+      {task.deadline && dDays !== null && !task.completed && dDays <= 7 && (
+        <div style={{ marginTop: 6, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          <span style={{ fontSize:11, fontWeight:600, padding:"2px 7px", borderRadius:10,
+            background: dDays < 0 ? "#ffeaea" : dDays <= 2 ? "#fff3e0" : "#f0f4e8",
+            color: dDays < 0 ? "#A04848" : dDays <= 2 ? "#C96038" : "#4A6B4A" }}>
+            {dDays < 0 ? "overdue " + Math.abs(dDays) + "d" : dDays === 0 ? "Due today" : dDays === 1 ? "Due tomorrow" : "Due in " + dDays + "d"}
+          </span>
+          <a href={"https://calendar.google.com/calendar/render?action=TEMPLATE&text=" + encodeURIComponent(task.title) + "&dates=" + (task.deadline||"").replace(/-/g,"") + "T090000Z/" + (task.deadline||"").replace(/-/g,"") + "T100000Z"}
+            target="_blank" rel="noopener noreferrer"
+            style={{ fontSize:11, color:"#4A6B8A", textDecoration:"none" }}>+ Google Calendar</a>
+        </div>
+      )}
       </div>
       <div style={{ display: "flex", gap: 2, position: "relative" }}>
         <button onClick={() => setSnoozeOpen(s => !s)} style={styles.iconBtn} title="Snooze"><Clock size={14} /></button>
@@ -1239,10 +1389,14 @@ function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, al
   const [form, setForm] = useState(task ? { ...task, deadline: task.deadline ? task.deadline.slice(0, 10) : "" } : {
     title: "", details: "", category: "life-admin", assignedTo: "Anyone",
     frequency: "weekly", deadline: "", priority: "medium", notify: true,
+    repeat: task?.repeat || "none", estimatedCost: task?.estimatedCost || "", actualCost: task?.actualCost || "",
+    subtasks: task?.subtasks || [], notes: task?.notes || [],
   });
   const [parseBusy, setParseBusy] = useState(false);
   const [parseHint, setParseHint] = useState(null);
   const [enrichBusy, setEnrichBusy] = useState(false);
+  const [newSubtask, setNewSubtask] = useState("");
+  const [newNote, setNewNote] = useState("");
   const [enrichSuggestions, setEnrichSuggestions] = useState(null);
   const [confirmDeleteForm, setConfirmDeleteForm] = useState(false);
   const [phrase, setPhrase] = useState("");
@@ -1373,6 +1527,49 @@ function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, al
               {parseHint.error || parseHint.ok}
             </div>
           )}
+        </Field>
+        <Field label="Repeat" full>
+          <select value={form.repeat || "none"} onChange={(e) => update("repeat", e.target.value)} style={styles.input}>
+            <option value="none">Does not repeat</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+            <option value="biweekly">Every 2 weeks</option>
+            <option value="monthly">Monthly</option>
+            <option value="quarterly">Every 3 months</option>
+            <option value="yearly">Yearly</option>
+          </select>
+        </Field>
+        <Field label="Budget (optional)">
+          <input type="text" value={form.estimatedCost || ""} onChange={(e) => update("estimatedCost", e.target.value)} placeholder="Estimated cost e.g. £300" style={styles.input} />
+        </Field>
+        <Field label="Actual Cost">
+          <input type="text" value={form.actualCost || ""} onChange={(e) => update("actualCost", e.target.value)} placeholder="Actual cost when known" style={styles.input} />
+        </Field>
+        <Field label="Checklist" full>
+          <div style={{ display:"flex", gap:8, marginBottom:6 }}>
+            <input value={newSubtask} onChange={e=>setNewSubtask(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter"&&newSubtask.trim()){ update("subtasks",[...(form.subtasks||[]),{id:Date.now(),text:newSubtask.trim(),done:false}]); setNewSubtask(""); e.preventDefault(); }}} placeholder="Add checklist item and press Enter" style={{...styles.input,flex:1}} />
+            <button type="button" onClick={()=>{ if(newSubtask.trim()){ update("subtasks",[...(form.subtasks||[]),{id:Date.now(),text:newSubtask.trim(),done:false}]); setNewSubtask(""); }}} style={{...styles.addBtn,minWidth:36,padding:"0 10px"}}>+</button>
+          </div>
+          {(form.subtasks||[]).map((st,i)=>(
+            <div key={st.id||i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+              <input type="checkbox" checked={!!st.done} onChange={()=>{ const s=[...(form.subtasks||[])]; s[i]={...s[i],done:!s[i].done}; update("subtasks",s); }} />
+              <span style={{flex:1,textDecoration:st.done?"line-through":"none",color:st.done?"#aaa":"inherit",fontSize:14}}>{st.text}</span>
+              <button type="button" onClick={()=>{ const s=(form.subtasks||[]).filter((_,j)=>j!==i); update("subtasks",s); }} style={{background:"none",border:"none",cursor:"pointer",color:"#c00",fontSize:14,padding:"0 4px"}}>✕</button>
+            </div>
+          ))}
+        </Field>
+        <Field label="Notes & Log" full>
+          <div style={{ display:"flex", gap:8, marginBottom:6 }}>
+            <input value={newNote} onChange={e=>setNewNote(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter"&&newNote.trim()){ update("notes",[...(form.notes||[]),{id:Date.now(),text:newNote.trim(),ts:new Date().toISOString()}]); setNewNote(""); e.preventDefault(); }}} placeholder="Add a note and press Enter" style={{...styles.input,flex:1}} />
+            <button type="button" onClick={()=>{ if(newNote.trim()){ update("notes",[...(form.notes||[]),{id:Date.now(),text:newNote.trim(),ts:new Date().toISOString()}]); setNewNote(""); }}} style={{...styles.addBtn,minWidth:36,padding:"0 10px"}}>+</button>
+          </div>
+          {(form.notes||[]).slice().reverse().map((n,i)=>(
+            <div key={n.id||i} style={{fontSize:13,padding:"5px 0",borderBottom:"1px solid #f0f0f0",display:"flex",gap:8}}>
+              <span style={{color:"#aaa",whiteSpace:"nowrap"}}>{new Date(n.ts).toLocaleDateString()}</span>
+              <span style={{flex:1}}>{n.text}</span>
+              <button type="button" onClick={()=>{ const ns=(form.notes||[]).filter(x=>x.id!==n.id); update("notes",ns); }} style={{background:"none",border:"none",cursor:"pointer",color:"#c00",fontSize:12}}>✕</button>
+            </div>
+          ))}
         </Field>
         <Field label="Notifications" full>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 4 }}>
@@ -1628,6 +1825,36 @@ function InsightsView({ tasks, events, aiCfg, identity, settings }) {
           ))}
         </div>
       )}
+      {(() => {
+        const tracked = tasks.filter(t => t.estimatedCost || t.actualCost);
+        if (tracked.length === 0) return null;
+        const parseAmt = (s) => { if (!s) return 0; const n = parseFloat(String(s).replace(/[^0-9.]/g,"")); return isNaN(n)?0:n; };
+        const totalEst = tracked.reduce((s,t)=>s+parseAmt(t.estimatedCost),0);
+        const totalAct = tracked.reduce((s,t)=>s+parseAmt(t.actualCost),0);
+        const fmt = (n) => n === 0 ? "—" : (n % 1 === 0 ? "£"+n : "£"+n.toFixed(2));
+        return (
+          <div style={{ ...styles.formCard, marginTop: 16 }}>
+            <h3 style={{ ...styles.categoryTitle, marginBottom: 12 }}>Budget Tracker ({tracked.length} tasks)</h3>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:12 }}>
+              <div style={{ background:"#f8f5f0", borderRadius:8, padding:"12px 16px" }}>
+                <div style={{ fontSize:11, color:"#888", marginBottom:4 }}>ESTIMATED TOTAL</div>
+                <div style={{ fontSize:22, fontWeight:700, color:"#4A6B8A" }}>{fmt(totalEst)}</div>
+              </div>
+              <div style={{ background:"#f8f5f0", borderRadius:8, padding:"12px 16px" }}>
+                <div style={{ fontSize:11, color:"#888", marginBottom:4 }}>ACTUAL TOTAL</div>
+                <div style={{ fontSize:22, fontWeight:700, color: totalAct > totalEst && totalEst > 0 ? "#A04848" : "#4A6B4A" }}>{fmt(totalAct)}</div>
+              </div>
+            </div>
+            {tracked.map(t=>(
+              <div key={t.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0", borderBottom:"1px solid #f0f0f0", fontSize:13 }}>
+                <span style={{ flex:1 }}>{t.title}</span>
+                <span style={{ color:"#888", marginRight:12 }}>est {fmt(parseAmt(t.estimatedCost))}</span>
+                <span style={{ color: parseAmt(t.actualCost) > parseAmt(t.estimatedCost) && parseAmt(t.estimatedCost)>0 ? "#A04848" : "#4A6B4A", fontWeight:600 }}>{t.actualCost ? "act "+fmt(parseAmt(t.actualCost)) : "—"}</span>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -2212,6 +2439,7 @@ const styles = {
   formGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 },
   label: { display: "block", fontSize: 12, fontWeight: 500, color: "#6B6B6B", marginBottom: 6, letterSpacing: "0.02em" },
   input: { width: "100%", padding: "10px 12px", border: "1px solid #D9D2C4", borderRadius: 3, backgroundColor: "#FFFFFF", fontSize: 14, color: "#1B2C3A" },
+  addBtn: { background: "#C96038", color: "#fff", border: "none", borderRadius: 4, padding: "8px 14px", cursor: "pointer", fontSize: 14, fontWeight: 600 },
   formActions: { display: "flex", gap: 12, justifyContent: "flex-end", marginTop: 28, paddingTop: 24, borderTop: "1px solid #E5DFD3" },
   emailCard: { backgroundColor: "#FFFFFF", border: "1px solid #E5DFD3", borderRadius: 4, overflow: "hidden" },
   emailMeta: { padding: "16px 24px", borderBottom: "1px solid #E5DFD3", backgroundColor: "#F2EDE4", display: "flex", flexDirection: "column", gap: 6, fontSize: 13 },
