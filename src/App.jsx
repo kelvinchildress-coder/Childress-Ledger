@@ -598,6 +598,7 @@ export default function FamilyLedger() {
             onAdd={() => { setEditingTask(null); setView("add"); }}
             onQuickAdd={upsertTask}
             onSnooze={snoozeTask}
+            onDelete={deleteTask}
             onExportICS={() => downloadICS(thisWeekTasks)}
             groupBy={groupBy} setGroupBy={setGroupBy}
             assigneeOptions={assigneeOptions}
@@ -619,7 +620,8 @@ export default function FamilyLedger() {
         {view === "add" && (
           <TaskForm task={editingTask} onSave={upsertTask}
             onCancel={() => { setEditingTask(null); setView(editingTask ? "all" : "dashboard"); }}
-            assigneeOptions={assigneeOptions} aiCfg={aiCfg} />
+            assigneeOptions={assigneeOptions} aiCfg={aiCfg}
+            allTasks={tasks} onDelete={editingTask ? deleteTask : undefined} />
         )}
         {view === "email" && (
           <EmailPreview tasks={thisWeekTasks} weekRange={getWeekRange()} settings={settings} />
@@ -806,7 +808,7 @@ function SyncErrorBanner({ error, backendUrl, onRetry }) {
 }
 
 /* DASHBOARD */
-function Dashboard({ tasks, allTasks, onToggle, onEdit, onAdd, onQuickAdd, onSnooze, onExportICS, groupBy, setGroupBy, assigneeOptions, events, identity, aiCfg, categories, frequencies }) {
+function Dashboard({ tasks, allTasks, onToggle, onEdit, onAdd, onQuickAdd, onSnooze, onDelete, onExportICS, groupBy, setGroupBy, assigneeOptions, events, identity, aiCfg, categories, frequencies }) {
   const grouped = useMemo(() => {
     const g = {};
     if (groupBy === "category") tasks.forEach(t => { (g[t.category] ||= []).push(t); });
@@ -866,7 +868,8 @@ function Dashboard({ tasks, allTasks, onToggle, onEdit, onAdd, onQuickAdd, onSno
                 <TaskCard key={t.id} task={t}
                   onToggle={() => onToggle(t.id)}
                   onEdit={() => onEdit(t)}
-                  onSnooze={(d) => onSnooze(t.id, d)} />
+                  onSnooze={(d) => onSnooze(t.id, d)}
+                  onDelete={onDelete ? () => onDelete(t.id) : undefined} />
               ))}
             </div>
           </section>
@@ -920,8 +923,9 @@ function renderDetails(text) {
   });
 }
 
-function TaskCard({ task, onToggle, onEdit, onSnooze }) {
+function TaskCard({ task, onToggle, onEdit, onSnooze, onDelete }) {
   const [snoozeOpen, setSnoozeOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const cat = CATEGORIES.find(c => c.id === task.category) || CATEGORIES[CATEGORIES.length - 1];
   const freq = FREQUENCIES.find(f => f.id === task.frequency);
   const dDays = daysUntil(task.deadline);
@@ -980,6 +984,18 @@ function TaskCard({ task, onToggle, onEdit, onSnooze }) {
       <div style={{ display: "flex", gap: 2, position: "relative" }}>
         <button onClick={() => setSnoozeOpen(s => !s)} style={styles.iconBtn} title="Snooze"><Clock size={14} /></button>
         <button onClick={onEdit} style={styles.iconBtn} aria-label="Edit"><Edit2 size={14} /></button>
+        {onDelete && (
+          <button onClick={() => setConfirmDelete(true)} style={{ ...styles.iconBtn, color: confirmDelete ? "#A04848" : undefined }} title="Delete task"><Trash2 size={14} /></button>
+        )}
+        {confirmDelete && (
+          <div style={{ position: "absolute", right: 0, top: "110%", background: "#fff", border: "1px solid #E0D9CF", borderRadius: 8, padding: "10px 14px", zIndex: 20, boxShadow: "0 4px 16px rgba(0,0,0,0.12)", minWidth: 180 }}>
+            <p style={{ margin: "0 0 8px", fontSize: 13, color: "#1B2C3A", fontWeight: 600 }}>Delete this task?</p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button style={{ fontSize: 12, padding: "4px 10px", background: "#A04848", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }} onClick={() => { onDelete(task.id); setConfirmDelete(false); }}>Yes, delete</button>
+              <button style={{ fontSize: 12, padding: "4px 10px", background: "transparent", border: "1px solid #ccc", borderRadius: 4, cursor: "pointer" }} onClick={() => setConfirmDelete(false)}>Cancel</button>
+            </div>
+          </div>
+        )}
         {snoozeOpen && (
           <SnoozeMenu onPick={snoozeFor}
             onCustom={(d) => { onSnooze(d); setSnoozeOpen(false); }}
@@ -1219,13 +1235,16 @@ function AllTasks({ tasks, allTasks, onEdit, onDelete, onAdd, onUnsnooze, onExpo
 }
 
 /* TASK FORM */
-function TaskForm({ task, onSave, onCancel, assigneeOptions, aiCfg }) {
+function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, allTasks }) {
   const [form, setForm] = useState(task ? { ...task, deadline: task.deadline ? task.deadline.slice(0, 10) : "" } : {
     title: "", details: "", category: "life-admin", assignedTo: "Anyone",
     frequency: "weekly", deadline: "", priority: "medium", notify: true,
   });
   const [parseBusy, setParseBusy] = useState(false);
   const [parseHint, setParseHint] = useState(null);
+  const [enrichBusy, setEnrichBusy] = useState(false);
+  const [enrichSuggestions, setEnrichSuggestions] = useState(null);
+  const [confirmDeleteForm, setConfirmDeleteForm] = useState(false);
   const [phrase, setPhrase] = useState("");
   const update = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const [titleError, setTitleError] = useState(false);
@@ -1248,6 +1267,39 @@ function TaskForm({ task, onSave, onCancel, assigneeOptions, aiCfg }) {
     setParseHint({ ok: "Set to " + (r.label || r.iso) });
   };
 
+  const enrichTask = async () => {
+    if (!aiCfg || !aiCfg.enabled) { setEnrichSuggestions({ error: "Enable the AI agent in Settings first." }); return; }
+    if (!form.title.trim()) { setEnrichSuggestions({ error: "Add a title first so the AI knows what to suggest." }); return; }
+    setEnrichBusy(true); setEnrichSuggestions(null);
+    const otherTasks = (allTasks || []).filter(t => !task || t.id !== task.id).map(t => t.title).slice(0, 20).join(", ");
+    const prompt = "Task: " + form.title.trim() + (form.details ? ". Current details: " + form.details : "") + ". Category: " + form.category + ". Frequency: " + form.frequency + (otherTasks ? ". Other tasks in this ledger: " + otherTasks : "") + ". Suggest 3-5 specific, actionable improvements for the details field: useful links (with full URLs), account numbers or reference codes needed, step-by-step instructions, deadlines to note, or other context that would help another parent complete this task. Return a JSON array of suggestion objects with fields: type (one of: link, detail, instruction, reminder), text (the suggestion text, include full URL if it is a link), and label (short 2-4 word label). Return only the JSON array, nothing else.";
+    try {
+      const r = await suggestTaskMetadata({
+        backendUrl: aiCfg.backendUrl, sharedSecret: aiCfg.sharedSecret,
+        title: form.title.trim(), knownAssignees: assigneeOptions, categories: [], frequencies: [],
+        extraPrompt: prompt,
+      });
+      setEnrichBusy(false);
+      if (!r || r.error) { setEnrichSuggestions({ error: (r && r.error && r.error.message) || "AI couldn't generate suggestions." }); return; }
+      const raw = r.suggestions || r.details || r.enrichSuggestions || r.raw;
+      if (raw) {
+        try {
+          const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+          setEnrichSuggestions({ items: Array.isArray(parsed) ? parsed : [] });
+        } catch(e) { setEnrichSuggestions({ items: [{ type: "detail", label: "AI suggestion", text: String(raw) }] }); }
+      } else {
+        setEnrichSuggestions({ items: [] });
+      }
+    } catch(e) { setEnrichBusy(false); setEnrichSuggestions({ error: "Request failed." }); }
+  };
+
+  const applyEnrichSuggestion = (item) => {
+    const addition = item.text;
+    update("details", form.details ? form.details + (form.details.endsWith("\n") ? "" : "\n") + addition : addition);
+    setEnrichSuggestions(prev => prev ? { ...prev, items: (prev.items || []).filter(i => i !== item) } : prev);
+  };
+
+
   return (
     <div style={styles.formCard}>
       <div style={styles.formHeader}>
@@ -1260,10 +1312,29 @@ function TaskForm({ task, onSave, onCancel, assigneeOptions, aiCfg }) {
             placeholder="e.g. File Q1 sales tax" style={{ ...styles.input, ...(titleError ? { borderColor: "#A04848", boxShadow: "0 0 0 2px rgba(160,72,72,0.2)" } : {}) }} />
           {titleError && <div style={{ color: "#A04848", fontSize: 12, marginTop: 4 }}>Title is required</div>}
         </Field>
-        <Field label="Details" full>
+        <Field label={<span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>Details{aiCfg && aiCfg.enabled && <button type="button" onClick={enrichTask} disabled={enrichBusy || !form.title.trim()} style={{ fontSize: 11, padding: "2px 8px", background: enrichBusy ? "#e0d9cf" : "#2C5F2E", color: "#fff", border: "none", borderRadius: 4, cursor: enrichBusy || !form.title.trim() ? "not-allowed" : "pointer", fontWeight: 500, display: "flex", alignItems: "center", gap: 4 }}><Sparkles size={11} />{enrichBusy ? "Thinking..." : "AI Suggest"}</button>}</span>} full>
           <textarea value={form.details} onChange={(e) => update("details", e.target.value)}
             placeholder="Account numbers, links, instructions, anything the other parent needs."
             rows={3} style={{ ...styles.input, fontFamily: "inherit", resize: "vertical" }} />
+          {enrichSuggestions && enrichSuggestions.error && (
+            <div style={{ fontSize: 12, color: "#A04848", marginTop: 6 }}>{enrichSuggestions.error}</div>
+          )}
+          {enrichSuggestions && enrichSuggestions.items && enrichSuggestions.items.length > 0 && (
+            <div style={{ marginTop: 8, background: "#F6F3EE", borderRadius: 8, padding: "10px 12px", border: "1px solid #E0D9CF" }}>
+              <div style={{ fontSize: 12, color: "#6B6B6B", fontWeight: 600, marginBottom: 6 }}>AI suggestions — click to add to details:</div>
+              {enrichSuggestions.items.map((item, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 6 }}>
+                  <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 10, background: item.type === "link" ? "#D4E6C3" : item.type === "instruction" ? "#D3E4F5" : item.type === "reminder" ? "#F5E6D3" : "#E8E4DE", color: "#1B2C3A", fontWeight: 600, whiteSpace: "nowrap", marginTop: 2 }}>{item.label || item.type}</span>
+                  <span style={{ fontSize: 12, color: "#1B2C3A", flex: 1 }}>{item.text}</span>
+                  <button type="button" onClick={() => applyEnrichSuggestion(item)} style={{ fontSize: 11, padding: "2px 8px", background: "#2C5F2E", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", whiteSpace: "nowrap" }}>+ Add</button>
+                </div>
+              ))}
+              <button type="button" onClick={() => setEnrichSuggestions(null)} style={{ fontSize: 11, color: "#8A8579", background: "none", border: "none", cursor: "pointer", padding: 0, marginTop: 2 }}>Dismiss</button>
+            </div>
+          )}
+          {enrichSuggestions && enrichSuggestions.items && enrichSuggestions.items.length === 0 && !enrichSuggestions.error && (
+            <div style={{ fontSize: 12, color: "#5C7A3F", marginTop: 6 }}>No additional suggestions — the details look complete!</div>
+          )}
         </Field>
         <Field label="Category">
           <select value={form.category} onChange={(e) => update("category", e.target.value)} style={styles.input}>
@@ -1313,9 +1384,22 @@ function TaskForm({ task, onSave, onCancel, assigneeOptions, aiCfg }) {
           </div>
         </Field>
       </div>
-      <div style={styles.formActions}>
-        <button onClick={onCancel} style={styles.ghostBtn}>Cancel</button>
-        <button onClick={submit} style={styles.primaryBtn}>{task ? "Save changes" : "Add task"}</button>
+      <div style={{ ...styles.formActions, justifyContent: "space-between" }}>
+        <div>
+          {task && onDelete && (
+            confirmDeleteForm
+              ? <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <span style={{ fontSize: 13, color: "#A04848" }}>Delete this task?</span>
+                  <button type="button" style={{ fontSize: 12, padding: "4px 10px", background: "#A04848", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }} onClick={() => { onDelete(task.id); setConfirmDeleteForm(false); }}>Yes, delete</button>
+                  <button type="button" style={{ fontSize: 12, padding: "4px 10px", background: "transparent", border: "1px solid #ccc", borderRadius: 4, cursor: "pointer" }} onClick={() => setConfirmDeleteForm(false)}>Cancel</button>
+                </div>
+              : <button type="button" onClick={() => setConfirmDeleteForm(true)} style={{ ...styles.ghostBtn, color: "#A04848", borderColor: "#A04848" }}><Trash2 size={14} /> Delete task</button>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={onCancel} style={styles.ghostBtn}>Cancel</button>
+          <button onClick={submit} style={styles.primaryBtn}>{task ? "Save changes" : "Add task"}</button>
+        </div>
       </div>
     </div>
   );
