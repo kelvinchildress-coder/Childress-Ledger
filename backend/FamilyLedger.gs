@@ -47,6 +47,7 @@ function doGet(e) {
     if (action === "ping") return jsonOut_({ ok: true, time: new Date().toISOString() });
     if (action === "load") return jsonOut_(loadAll_());
     if (action === "ics")  return icsOut_(buildIcs_());
+    if (action === "google-import") return jsonOut_(googleImport_(e));
     return jsonOut_({ error: "Unknown action: " + action });
   } catch (err) {
     return jsonOut_({ error: String(err && err.message || err) });
@@ -63,6 +64,7 @@ function doPost(e) {
     if (action === "save")            return jsonOut_(saveAll_(body.data || {}));
     if (action === "ai")              return jsonOut_(aiProxy_(body));
     if (action === "subscribe-push")  return jsonOut_(registerSub_(body));
+    if (action === "google-search") return jsonOut_(googleSearch_(body));
     return jsonOut_({ error: "Unknown action: " + action });
   } catch (err) {
     return jsonOut_({ error: String(err && err.message || err) });
@@ -640,4 +642,200 @@ function setupTriggers_() {
 
   ScriptApp.newTrigger("sendDailyDigest").timeBased()
     .everyDays(1).atHour(20).create();
+}
+
+
+/* =========================================================================
+ * GOOGLE SERVICES INTEGRATION (Gmail, Calendar, Keep)
+ * =========================================================================
+ *
+ * These run inside Apps Script as the script owner, so they have access
+ * to the owner's Gmail, Calendar, and Tasks (Keep tasks sync via Tasks API).
+ *
+ * doGet: action=google-import  — returns recent email subjects, calendar
+ *   events, and Keep/Tasks items so the PWA can suggest tasks.
+ * doPost: action=google-search — searches with a query string for more
+ *   targeted results.
+ */
+
+/**
+ * GET ?action=google-import
+ * Returns recent Gmail threads (subjects + snippets), upcoming calendar events,
+ * and Google Tasks (Keep-synced lists) as raw data for task suggestions.
+ */
+function googleImport_(e) {
+  const maxEmails = parseInt(e.parameter.maxEmails || "10", 10);
+  const maxEvents = parseInt(e.parameter.maxEvents || "15", 10);
+  const maxTasks  = parseInt(e.parameter.maxTasks  || "20", 10);
+  const daysAhead = parseInt(e.parameter.daysAhead || "14", 10);
+
+  const results = { emails: [], events: [], tasks: [], errors: [] };
+
+  // ---- Gmail: recent unread/important threads ----
+  try {
+    const threads = GmailApp.search("is:unread OR is:important", 0, maxEmails);
+    threads.forEach(function(thread) {
+      const msg = thread.getMessages()[0];
+      results.emails.push({
+        subject: msg.getSubject(),
+        from: msg.getFrom(),
+        snippet: thread.getFirstMessageSubject(),
+        date: msg.getDate().toISOString(),
+        id: thread.getId(),
+      });
+    });
+  } catch(err) {
+    results.errors.push({ service: "gmail", error: String(err.message || err) });
+  }
+
+  // ---- Google Calendar: upcoming events ----
+  try {
+    const now = new Date();
+    const future = new Date(now.getTime() + daysAhead * 86400000);
+    const calendars = CalendarApp.getAllCalendars();
+    calendars.slice(0, 5).forEach(function(cal) {
+      if (cal.isHidden()) return;
+      const events = cal.getEvents(now, future);
+      events.slice(0, Math.floor(maxEvents / Math.max(calendars.length, 1)) + 2).forEach(function(ev) {
+        results.events.push({
+          title: ev.getTitle(),
+          start: ev.getStartTime().toISOString(),
+          end: ev.getEndTime().toISOString(),
+          calendar: cal.getName(),
+          description: (ev.getDescription() || "").substring(0, 200),
+          id: ev.getId(),
+          isAllDay: ev.isAllDayEvent(),
+        });
+      });
+    });
+    // Sort and trim
+    results.events.sort(function(a, b) { return a.start < b.start ? -1 : 1; });
+    results.events = results.events.slice(0, maxEvents);
+  } catch(err) {
+    results.errors.push({ service: "calendar", error: String(err.message || err) });
+  }
+
+  // ---- Google Tasks (syncs with Keep checklists) ----
+  try {
+    const taskLists = Tasks.Tasklists.list({ maxResults: 10 });
+    if (taskLists.items) {
+      taskLists.items.forEach(function(list) {
+        const taskItems = Tasks.Tasks.list(list.id, {
+          maxResults: Math.ceil(maxTasks / Math.max(taskLists.items.length, 1)),
+          showCompleted: false,
+          showHidden: false,
+        });
+        if (taskItems.items) {
+          taskItems.items.forEach(function(task) {
+            results.tasks.push({
+              title: task.title,
+              notes: (task.notes || "").substring(0, 300),
+              due: task.due || null,
+              status: task.status,
+              list: list.title,
+              id: task.id,
+            });
+          });
+        }
+      });
+    }
+    results.tasks = results.tasks.slice(0, maxTasks);
+  } catch(err) {
+    results.errors.push({ service: "tasks", error: String(err.message || err) });
+  }
+
+  return results;
+}
+
+/**
+ * POST { action: "google-search", query, services }
+ * Targeted search across Gmail / Calendar / Tasks for a specific query.
+ * services: array like ["gmail","calendar","tasks"] — defaults to all.
+ */
+function googleSearch_(body) {
+  const query   = (body.query || "").trim();
+  const services = body.services || ["gmail", "calendar", "tasks"];
+  if (!query) return { error: "query is required" };
+
+  const results = { emails: [], events: [], tasks: [], query: query, errors: [] };
+
+  // ---- Gmail search ----
+  if (services.indexOf("gmail") >= 0) {
+    try {
+      const threads = GmailApp.search(query, 0, 10);
+      threads.forEach(function(thread) {
+        const msg = thread.getMessages()[0];
+        results.emails.push({
+          subject: msg.getSubject(),
+          from: msg.getFrom(),
+          snippet: msg.getPlainBody().substring(0, 300),
+          date: msg.getDate().toISOString(),
+          id: thread.getId(),
+        });
+      });
+    } catch(err) {
+      results.errors.push({ service: "gmail", error: String(err.message || err) });
+    }
+  }
+
+  // ---- Calendar search ----
+  if (services.indexOf("calendar") >= 0) {
+    try {
+      const now = new Date();
+      const future = new Date(now.getTime() + 60 * 86400000); // 60 days
+      const past   = new Date(now.getTime() - 30 * 86400000); // 30 days back
+      CalendarApp.getAllCalendars().slice(0, 5).forEach(function(cal) {
+        if (cal.isHidden()) return;
+        cal.getEvents(past, future).forEach(function(ev) {
+          if (ev.getTitle().toLowerCase().indexOf(query.toLowerCase()) >= 0 ||
+              (ev.getDescription() || "").toLowerCase().indexOf(query.toLowerCase()) >= 0) {
+            results.events.push({
+              title: ev.getTitle(),
+              start: ev.getStartTime().toISOString(),
+              end: ev.getEndTime().toISOString(),
+              calendar: cal.getName(),
+              id: ev.getId(),
+            });
+          }
+        });
+      });
+      results.events = results.events.slice(0, 10);
+    } catch(err) {
+      results.errors.push({ service: "calendar", error: String(err.message || err) });
+    }
+  }
+
+  // ---- Tasks search ----
+  if (services.indexOf("tasks") >= 0) {
+    try {
+      const taskLists = Tasks.Tasklists.list({ maxResults: 10 });
+      if (taskLists.items) {
+        taskLists.items.forEach(function(list) {
+          const taskItems = Tasks.Tasks.list(list.id, {
+            maxResults: 50,
+            showCompleted: false,
+            showHidden: false,
+          });
+          if (taskItems.items) {
+            taskItems.items.forEach(function(task) {
+              if (task.title.toLowerCase().indexOf(query.toLowerCase()) >= 0 ||
+                  (task.notes || "").toLowerCase().indexOf(query.toLowerCase()) >= 0) {
+                results.tasks.push({
+                  title: task.title,
+                  notes: (task.notes || "").substring(0, 300),
+                  due: task.due || null,
+                  list: list.title,
+                  id: task.id,
+                });
+              }
+            });
+          }
+        });
+      }
+    } catch(err) {
+      results.errors.push({ service: "tasks", error: String(err.message || err) });
+    }
+  }
+
+  return results;
 }
