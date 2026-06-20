@@ -17,6 +17,9 @@
  *        Execute as: me
  *        Who has access: Anyone   (NOT "Anyone with Google account")
  *      Copy the /exec URL into the PWA Settings page.
+ * 3. Enable Google Tasks API (for Keep/Tasks integration):
+ *    In Apps Script editor → Services (+) button → find "Tasks API" → Add.
+ *    Without this step, the google-import action won't read Google Tasks.
  */
 
 /* =========================================================================
