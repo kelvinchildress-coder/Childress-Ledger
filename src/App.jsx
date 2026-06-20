@@ -486,6 +486,23 @@ export default function FamilyLedger() {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, []);
+  const [googleCtx, setGoogleCtx] = useState(null);
+  const [googleLoading, setGoogleLoading] = useState(false);
+
+  const fetchGoogleCtx = useCallback(async (forceRefresh = false) => {
+    const url = settings.backendUrl || ENV_BACKEND_URL;
+    const secret = settings.sharedSecret || ENV_SHARED_SECRET;
+    if (!url) {
+      setGoogleCtx({ ok: false, emails: [], events: [], tasks: [], errors: [], errorMessage: "No backend URL configured." });
+      return;
+    }
+    setGoogleLoading(true);
+    const ctx = await fetchGoogleContext(url, secret, { forceRefresh });
+    setGoogleCtx(ctx);
+    setGoogleLoading(false);
+  }, [settings.backendUrl, settings.sharedSecret]);
+
+
 
   async function persistLocal(nextTasks) {
     try { await storage.set(STORAGE_KEY, JSON.stringify({ tasks: nextTasks })); }
@@ -1695,21 +1712,7 @@ function InsightsView({ tasks, events, aiCfg, identity, settings }) {
   const myStreak = useMemo(() => personalDailyStreak(tasks, identity && identity.name), [tasks, identity]);
   const [retro, setRetro] = useState(null);
   const [retroBusy, setRetroBusy] = useState(false);
-  const [googleCtx, setGoogleCtx] = useState(null);
-  const [googleLoading, setGoogleLoading] = useState(false);
-
-  const fetchGoogleCtx = useCallback(async (forceRefresh = false) => {
-    const url = settings.backendUrl || ENV_BACKEND_URL;
-    const secret = settings.sharedSecret || ENV_SHARED_SECRET;
-    if (!url) {
-      setGoogleCtx({ ok: false, emails: [], events: [], tasks: [], errors: [], errorMessage: "No backend URL configured." });
-      return;
-    }
-    setGoogleLoading(true);
-    const ctx = await fetchGoogleContext(url, secret, { forceRefresh });
-    setGoogleCtx(ctx);
-    setGoogleLoading(false);
-  }, [settings.backendUrl, settings.sharedSecret]);
+  
 
 
   const runRetro = async () => {
