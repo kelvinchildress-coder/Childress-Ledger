@@ -5,6 +5,10 @@ import {
   pingBackend, loadFromBackend, syncToBackend, webcalUrl, formatDebugInfo,
 } from "./sync.js";
 import {
+  fetchGoogleContext, searchGoogleServices, googleContextToPrompt,
+  findSimilarGoogleTasks, clearGoogleCache,
+} from "./googleImport.js";
+import {
   loadIdentity, saveIdentity, clearIdentity, makeIdentity,
   weeklyLeaderboard, personalDailyStreak,
 } from "./identity.js";
@@ -758,7 +762,11 @@ export default function FamilyLedger() {
             identity={identity}
             onResetIdentity={async () => { await clearIdentity(); setIdentity(null); }}
             backendUrl={effectiveBackendUrl} sharedSecret={effectiveSharedSecret}
-            envBackendUrl={ENV_BACKEND_URL} />
+            envBackendUrl={ENV_BACKEND_URL} 
+              googleCtx={googleCtx}
+              googleLoading={googleLoading}
+              onFetchGoogle={fetchGoogleCtx}
+              />
         )}
         {view === "calendar" && (
           <div style={{ padding: "24px 16px" }}>
@@ -1860,7 +1868,7 @@ function InsightsView({ tasks, events, aiCfg, identity, settings }) {
 }
 
 /* SETTINGS */
-function Settings({ settings, onSave, identity, onResetIdentity, backendUrl, sharedSecret, envBackendUrl }) {
+function Settings({ settings, onSave, identity, onResetIdentity, backendUrl, sharedSecret, envBackendUrl , googleCtx, googleLoading, onFetchGoogle}) {
   const [draft, setDraft] = useState({ ...settings, backendUrl: settings.backendUrl || envBackendUrl });
   const [saved, setSaved] = useState(false);
   const [testStatus, setTestStatus] = useState(null);
@@ -1868,6 +1876,19 @@ function Settings({ settings, onSave, identity, onResetIdentity, backendUrl, sha
   const [pushStatus, setPushStatus] = useState({ supported: false });
 
   useEffect(() => { getPushStatus().then(setPushStatus); }, []);
+  const [googleCtx, setGoogleCtx] = useState(null);
+  const [googleLoading, setGoogleLoading] = useState(false);
+
+  const fetchGoogleCtx = useCallback(async (forceRefresh = false) => {
+    const url = settings.backendUrl || ENV_BACKEND_URL;
+    const secret = settings.sharedSecret || ENV_SHARED_SECRET;
+    if (!url) { setGoogleCtx({ ok: false, emails: [], events: [], tasks: [], errors: [], errorMessage: "No backend URL configured." }); return; }
+    setGoogleLoading(true);
+    const ctx = await fetchGoogleContext(url, secret, { forceRefresh });
+    setGoogleCtx(ctx);
+    setGoogleLoading(false);
+  }, [settings.backendUrl, settings.sharedSecret]);
+
   const update = (k, v) => setDraft(d => ({ ...d, [k]: v }));
   const save = async () => { await onSave(draft); setSaved(true); setTimeout(() => setSaved(false), 2000); };
   const updateKid = (i, v) => { const next = [...draft.kidNames]; next[i] = v; update("kidNames", next); };
@@ -2001,6 +2022,42 @@ function Settings({ settings, onSave, identity, onResetIdentity, backendUrl, sha
         </div>
       </div>
       <div style={{ ...styles.formCard, marginTop: 24 }}>
+
+        {/* ── Google Services Integration ── */}
+        <h2 style={styles.sectionTitle}>Google Services</h2>
+        <p style={styles.mutedText}>
+          Connect to Gmail, Google Calendar, and Google Tasks (Keep).
+          Runs through your Apps Script — no extra OAuth needed.
+        </p>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
+          <button
+            style={{ ...styles.btn, ...styles.btnSecondary, opacity: googleLoading ? 0.6 : 1 }}
+            disabled={googleLoading}
+            onClick={() => { if (onFetchGoogle) onFetchGoogle(true); }}
+          >
+            {googleLoading ? "Connecting…" : "🔗 Connect / Refresh Google"}
+          </button>
+          {googleCtx && googleCtx.ok && (
+            <span style={{ fontSize: 13, color: "#5C7A3F" }}>
+              ✓ Connected — {googleCtx.emails.length} emails · {googleCtx.events.length} events · {googleCtx.tasks.length} tasks
+            </span>
+          )}
+          {googleCtx && !googleCtx.ok && (
+            <span style={{ fontSize: 13, color: "#C9603C" }}>
+              ✗ {googleCtx.errorMessage || "Could not connect"}
+            </span>
+          )}
+        </div>
+        {googleCtx && googleCtx.errors && googleCtx.errors.length > 0 && (
+          <p style={{ fontSize: 12, color: "#8A8579", marginTop: 4 }}>
+            Partial errors: {googleCtx.errors.map(e => e.service + ": " + e.error).join(" · ")}
+          </p>
+        )}
+        <p style={{ ...styles.mutedText, marginTop: 6 }}>
+          Once connected, the AI brainstorm will use your Gmail threads, upcoming
+          calendar events, and existing tasks as context for smarter suggestions.
+        </p>
+
         <h2 style={styles.sectionTitle}>Push notifications</h2>
         <p style={{ color: "#6B6B6B", margin: "4px 0 16px" }}>
           Sunday 7am summary + optional daily digest as a real push notification.
@@ -2108,7 +2165,7 @@ function BrainstormView({ household, aiCfg, categories, frequencies, assigneeOpt
 
     const r = await brainstormTasks({
       backendUrl: aiCfg.backendUrl, sharedSecret: aiCfg.sharedSecret,
-      conversation: next, household, categories, frequencies,
+      conversation: next, household, googleContext: googleCtx && googleCtx.ok ? googleContextToPrompt(googleCtx) : undefined, categories, frequencies,
     });
     setBusy(false);
 
