@@ -192,3 +192,47 @@ export function formatDebugInfo(error, url) {
     2
   );
 }
+
+
+/** GET ?action=google-import — fetch Gmail threads, Calendar events, and Tasks. */
+export async function importFromGoogle(url, sharedSecret, opts = {}) {
+  if (!url) return { ok: false, error: { kind: "config", message: "No backend URL set." } };
+  try {
+    const params = { action: "google-import", secret: sharedSecret || "" };
+    if (opts.maxEmails)  params.maxEmails  = String(opts.maxEmails);
+    if (opts.maxEvents)  params.maxEvents  = String(opts.maxEvents);
+    if (opts.maxTasks)   params.maxTasks   = String(opts.maxTasks);
+    if (opts.daysAhead)  params.daysAhead  = String(opts.daysAhead);
+    const res = await withTimeout((signal) =>
+      fetch(appendQuery(url, params), { method: "GET", signal })
+    );
+    if (!res.ok) return { ok: false, error: classify(null, res) };
+    const data = await res.json();
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: classify(e) };
+  }
+}
+
+/** POST { action: "google-search", query, services } — search Gmail / Calendar / Tasks. */
+export async function searchGoogle(url, query, sharedSecret, services = ["gmail", "calendar", "tasks"]) {
+  if (!url) return { ok: false, error: { kind: "config", message: "No backend URL set." } };
+  if (!query || !query.trim()) return { ok: false, error: { kind: "config", message: "Query is required." } };
+  try {
+    const res = await withTimeout(
+      (signal) =>
+        fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+          body: JSON.stringify({ action: "google-search", secret: sharedSecret || "", query: query.trim(), services }),
+          signal,
+        }),
+      12000
+    );
+    if (!res.ok) return { ok: false, error: classify(null, res) };
+    const data = await res.json();
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: classify(e) };
+  }
+}
