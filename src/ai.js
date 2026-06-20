@@ -189,7 +189,7 @@ export async function parseDeadline({ backendUrl, sharedSecret, phrase, today })
  * Returns:
  *   { reply, proposedTasks: [...], followUp, done } | { error }
  */
-export async function brainstormTasks({ backendUrl, sharedSecret, conversation, household, categories, frequencies }) {
+export async function brainstormTasks({ backendUrl, sharedSecret, conversation, household, categories, frequencies , googleContext}) {
   const assignees = [
     ...(household.parentNames || []),
     "Both Parents",
@@ -229,6 +229,9 @@ export async function brainstormTasks({ backendUrl, sharedSecret, conversation, 
 }` +
     "\nSet done: true only when the user has explicitly confirmed they're satisfied with the list." +
     "\nOn the first message, proposedTasks should usually be empty and you ask a clarifying question.";
+  if (googleContext) {
+    system += "\n\n" + googleContext;
+  }
 
   // Flatten the conversation into a single user message — Apps Script proxy
   // expects { system, prompt } not full message history.
