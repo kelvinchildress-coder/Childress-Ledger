@@ -198,7 +198,7 @@ export async function brainstormTasks({ backendUrl, sharedSecret, conversation, 
     "Family",
   ];
 
-  const system =
+  let system =
     "You are a warm, practical family-operations brainstorm partner helping a household plan tasks. " +
     "Your job: through natural conversation, help the user produce a complete list of tasks for whatever they're planning. " +
     "Behaviour rules:\n" +
