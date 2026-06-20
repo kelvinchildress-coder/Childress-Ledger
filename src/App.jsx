@@ -752,6 +752,7 @@ export default function FamilyLedger() {
             assigneeOptions={assigneeOptions}
             onAddTask={upsertTask}
             onAddTasks={upsertTasks}
+                      googleCtx={googleCtx}
           />
         )}
         {view === "insights" && (
@@ -1694,6 +1695,22 @@ function InsightsView({ tasks, events, aiCfg, identity, settings }) {
   const myStreak = useMemo(() => personalDailyStreak(tasks, identity && identity.name), [tasks, identity]);
   const [retro, setRetro] = useState(null);
   const [retroBusy, setRetroBusy] = useState(false);
+  const [googleCtx, setGoogleCtx] = useState(null);
+  const [googleLoading, setGoogleLoading] = useState(false);
+
+  const fetchGoogleCtx = useCallback(async (forceRefresh = false) => {
+    const url = settings.backendUrl || ENV_BACKEND_URL;
+    const secret = settings.sharedSecret || ENV_SHARED_SECRET;
+    if (!url) {
+      setGoogleCtx({ ok: false, emails: [], events: [], tasks: [], errors: [], errorMessage: "No backend URL configured." });
+      return;
+    }
+    setGoogleLoading(true);
+    const ctx = await fetchGoogleContext(url, secret, { forceRefresh });
+    setGoogleCtx(ctx);
+    setGoogleLoading(false);
+  }, [settings.backendUrl, settings.sharedSecret]);
+
 
   const runRetro = async () => {
     if (!aiCfg.enabled) return;
@@ -1876,18 +1893,7 @@ function Settings({ settings, onSave, identity, onResetIdentity, backendUrl, sha
   const [pushStatus, setPushStatus] = useState({ supported: false });
 
   useEffect(() => { getPushStatus().then(setPushStatus); }, []);
-  const [googleCtx, setGoogleCtx] = useState(null);
-  const [googleLoading, setGoogleLoading] = useState(false);
-
-  const fetchGoogleCtx = useCallback(async (forceRefresh = false) => {
-    const url = settings.backendUrl || ENV_BACKEND_URL;
-    const secret = settings.sharedSecret || ENV_SHARED_SECRET;
-    if (!url) { setGoogleCtx({ ok: false, emails: [], events: [], tasks: [], errors: [], errorMessage: "No backend URL configured." }); return; }
-    setGoogleLoading(true);
-    const ctx = await fetchGoogleContext(url, secret, { forceRefresh });
-    setGoogleCtx(ctx);
-    setGoogleLoading(false);
-  }, [settings.backendUrl, settings.sharedSecret]);
+  
 
   const update = (k, v) => setDraft(d => ({ ...d, [k]: v }));
   const save = async () => { await onSave(draft); setSaved(true); setTimeout(() => setSaved(false), 2000); };
@@ -2136,7 +2142,7 @@ function Settings({ settings, onSave, identity, onResetIdentity, backendUrl, sha
 }
 
 /* BRAINSTORM CHAT */
-function BrainstormView({ household, aiCfg, categories, frequencies, assigneeOptions, onAddTask, onAddTasks }) {
+function BrainstormView({ household, aiCfg, categories, frequencies, assigneeOptions, onAddTask, onAddTasks , googleCtx}) {
   const [conversation, setConversation] = useState([
     { role: "assistant", content: "Hi! Tell me what you're planning - a project, an event, a new routine, a season change, anything - and I'll help turn it into a clean list of tasks for the ledger. What's on your mind?" },
   ]);
