@@ -342,97 +342,94 @@ export async function analyzePhoto({ backendUrl, sharedSecret, imageBase64, imag
      * @returns {object}    { ok, digest: { [person]: { main: Task[], bonus: Task[] } }, raw }
       */
 export async function generateDailyDigest({ backendUrl, sharedSecret, tasks, assignees, today }) {
-    if (!backendUrl) return { ok: false, error: "backendUrl not configured" };
+  if (!backendUrl) return { ok: false, error: "backendUrl not configured" };
 
-    const todayStr = today || new Date().toISOString().slice(0, 10);
+  const todayStr = today || new Date().toISOString().slice(0, 10);
 
-    // Build a compact task list for the prompt
-    const openTasks = tasks.filter(t => {
-          if (t.snoozedUntil && t.snoozedUntil > todayStr) return false;
-          const hist = t.completionHistory || [];
-          if (hist.includes(todayStr)) return false;
-          return true;
-    });
+  // Build a compact task list for the prompt
+  const openTasks = tasks.filter(t => {
+    if (t.snoozedUntil && t.snoozedUntil > todayStr) return false;
+    const hist = t.completionHistory || [];
+    if (hist.includes(todayStr)) return false;
+    return true;
+  });
 
-    const taskSummary = openTasks.map(t => {
-          const daysLeft = t.deadline
-            ? Math.round((new Date(t.deadline) - new Date(todayStr)) / 86400000)
-                  : null;
-          return {
-                  id: t.id,
-                  title: t.title,
-                  category: t.category,
-                  assignedTo: t.assignedTo,
-                  priority: t.priority,
-                  frequency: t.frequency,
-                  deadline: t.deadline || null,
-                  daysUntilDeadline: daysLeft,
-                  lastCompleted: t.lastCompleted || null,
-                  details: (t.details || "").slice(0, 120),
-          };
-    });
+  const taskSummary = openTasks.map(t => {
+    const daysLeft = t.deadline
+      ? Math.round((new Date(t.deadline) - new Date(todayStr)) / 86400000)
+      : null;
+    return {
+      id: t.id,
+      title: t.title,
+      category: t.category,
+      assignedTo: t.assignedTo,
+      priority: t.priority,
+      frequency: t.frequency,
+      deadline: t.deadline || null,
+      daysUntilDeadline: daysLeft,
+      lastCompleted: t.lastCompleted || null,
+      details: (t.details || "").slice(0, 120),
+    };
+  });
 
-    const prompt = `Today is ${todayStr}. You are the family task coordinator for the Childress household.
+  const assignee0 = assignees[0] || "Person1";
+  const assignee1 = assignees[1] || "Person2";
+  const prompt = `Today is ${todayStr}. You are the family task coordinator for the Childress household.
 
-    Family members: ${assignees.join(", ")}
+Family members: ${assignees.join(", ")}
 
-    Here are all open tasks (JSON array):
-    ${JSON.stringify(taskSummary, null, 1)}
+Here are all open tasks (JSON array):
+${JSON.stringify(taskSummary, null, 1)}
 
-    Your job:
-    1. For EACH family member, select exactly 5 "main" tasks they should do TODAY and up to 2 "bonus" tasks (nice to do if time allows).
-    2. Assign smart deadlines to any task that lacks one. Use these rules:
-       - daily/weekly chores without a deadline → set deadline 3-7 days from today
-          - monthly tasks → 30 days
-             - house maintenance → 14-30 days based on urgency
-                - bills → next due date logic (7-14 days)
-                   - once-off tasks → 7 days
-                   3. Main tasks should be: overdue or due soon first, then high-priority, then variety across categories.
-                   4. Bonus tasks: non-urgent but beneficial items.
-                   5. Consider BOTH users' lists together to avoid duplicate heavy tasks on the same day.
-                   6. For tasks assigned to "Anyone", assign them to the person with fewer main tasks.
-                   7. Each task should include a brief "whyToday" note (1 sentence) explaining why it's on today's list.
+Your job:
+1. For EACH family member, select exactly 5 "main" tasks they should do TODAY and up to 2 "bonus" tasks.
+2. Assign smart deadlines to any task that lacks one:
+   - daily/weekly chores without a deadline: set deadline 3-7 days from today
+   - monthly tasks: 30 days
+   - house maintenance: 14-30 days based on urgency
+   - bills: 7-14 days
+   - once-off tasks: 7 days
+3. Main tasks: overdue or due soon first, then high-priority, then variety across categories.
+4. Bonus tasks: non-urgent but beneficial items.
+5. Avoid duplicate heavy tasks on the same day for both users.
+6. For tasks assigned to "Anyone", assign to the person with fewer main tasks.
+7. Each task needs a brief "whyToday" note (1 sentence).
 
-                   Return ONLY valid JSON (no markdown fences) in this exact shape:
-                   {
-                     "digest": {
-                         "${assignees[0] || "Person1"}": {
-                               "main": [
-                                       { "id": "task_id", "title": "...", "category": "...", "priority": "...", "deadline": "YYYY-MM-DD", "whyToday": "..." }
-                                             ],
-                                                   "bonus": [
-                                                           { "id": "task_id", "title": "...", "category": "...", "priority": "...", "deadline": "YYYY-MM-DD", "whyToday": "..." }
-                                                                 ]
-                                                                     },
-                                                                         "${assignees[1] || "Person2"}": {
-                                                                               "main": [],
-                                                                                     "bonus": []
-                                                                                         }
-                                                                                           },
-                                                                                             "deadlineUpdates": [
-                                                                                                 { "id": "task_id", "suggestedDeadline": "YYYY-MM-DD" }
-                                                                                                   ]
-                                                                                                   }`;
+Return ONLY valid JSON (no markdown fences) in this exact shape:
+{
+  "digest": {
+    "${assignee0}": {
+      "main": [{ "id": "task_id", "title": "...", "category": "...", "priority": "...", "deadline": "YYYY-MM-DD", "whyToday": "..." }],
+      "bonus": [{ "id": "task_id", "title": "...", "category": "...", "priority": "...", "deadline": "YYYY-MM-DD", "whyToday": "..." }]
+    },
+    "${assignee1}": { "main": [], "bonus": [] }
+  },
+  "deadlineUpdates": [{ "id": "task_id", "suggestedDeadline": "YYYY-MM-DD" }]
+}`;
 
-    try {
-          const result = await callAiAgent({
-                  backendUrl,
-                  sharedSecret,
-                  action: "ai",
-                  prompt,
-                  system: "You are a precise family task coordinator. Always return valid JSON only.",
-                  max_tokens: 1400,
-          });
+  try {
+    const result = await callAiAgent(backendUrl, {
+      system: "You are a precise family task coordinator. Always return valid JSON only.",
+      prompt,
+      max_tokens: 1400,
+      purpose: "daily-digest",
+    }, sharedSecret);
 
-          if (!result.ok || !result.text) return { ok: false, error: result.error || "No response from AI" };
-
-          const parsed = tryParseJson(result.text);
-          if (!parsed || !parsed.digest) {
-                  return { ok: false, error: "Could not parse AI response", raw: result.text };
-          }
-
-          return { ok: true, digest: parsed.digest, deadlineUpdates: parsed.deadlineUpdates || [], raw: result.text };
-    } catch (err) {
-          return { ok: false, error: err.message };
+    if (!result.ok || !result.data) {
+      const errMsg = typeof result.error === "object"
+        ? (result.error.message || JSON.stringify(result.error))
+        : (result.error || "No response from AI");
+      return { ok: false, error: errMsg };
     }
+
+    const text = result.data.text || result.data.content || "";
+    const parsed = tryParseJson(text);
+    if (!parsed || !parsed.digest) {
+      return { ok: false, error: "Could not parse AI response", raw: text };
+    }
+
+    return { ok: true, digest: parsed.digest, deadlineUpdates: parsed.deadlineUpdates || [], raw: text };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 }
