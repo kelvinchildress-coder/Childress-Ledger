@@ -13,8 +13,14 @@ import {
   weeklyLeaderboard, personalDailyStreak,
 } from "./identity.js";
 import {
-  suggestTaskMetadata, weeklyRetrospective, staleTaskAdvice, parseDeadline, brainstormTasks,
+  suggestTaskMetadata, weeklyRetrospective, staleTaskAdvice, parseDeadline, brainstormTasks, analyzePhoto,
 } from "./ai.js";
+import {
+  loadRemindersFromBackend, saveRemindersToBackend,
+  loadRemindersLocal, saveRemindersLocal,
+  getDueReminders, reminderToTask, nextOccurrence, daysUntil, ageThisYear,
+  REMINDER_TYPES, DEFAULT_LEAD_DAYS,
+} from "./reminders.js";
 import {
   loadEventLog, appendEvent, rerankByUsage,
   findStaleTasks, detectSnoozePatterns, throughputTrend, detectRepeatQuickAdds,
@@ -31,6 +37,7 @@ import {
   Settings as SettingsIcon, Cloud, CloudOff, Bell, BellOff,
   Wand2, TrendingUp, TrendingDown, Trophy, RefreshCw, ChevronDown,
   Brain, Lightbulb, ArrowRight, MessageCircle, Send,
+  Gift, Camera, MapPin,
 } from "lucide-react";
 
 /* CONSTANTS */
@@ -502,6 +509,35 @@ export default function FamilyLedger() {
     setGoogleLoading(false);
   }, [settings.backendUrl, settings.sharedSecret]);
 
+  // ── Reminders state ──────────────────────────────────────────────
+  const [remindersList, setRemindersList] = useState(() => loadRemindersLocal());
+  const [remindersLoading, setRemindersLoading] = useState(false);
+  const [dueReminderTasks, setDueReminderTasks] = useState([]);
+
+  const fetchReminders = useCallback(async () => {
+    if (!backendUrl || !sharedSecret) return;
+    setRemindersLoading(true);
+    try {
+      const result = await loadRemindersFromBackend({ backendUrl, sharedSecret });
+      setRemindersList(result);
+      const due = getDueReminders(result);
+      setDueReminderTasks(due.map(d => reminderToTask(d.reminder, d.daysUntil)));
+    } finally {
+      setRemindersLoading(false);
+    }
+  }, [backendUrl, sharedSecret]);
+
+  const saveReminders = useCallback(async (newList) => {
+    setRemindersList(newList);
+    saveRemindersLocal(newList);
+    if (backendUrl && sharedSecret) {
+      await saveRemindersToBackend({ backendUrl, sharedSecret, reminders: newList });
+    }
+  }, [backendUrl, sharedSecret]);
+
+  // Load reminders on mount
+  useEffect(() => { fetchReminders(); }, [fetchReminders]);
+
 
 
   async function persistLocal(nextTasks) {
@@ -793,6 +829,16 @@ export default function FamilyLedger() {
             <CalendarView tasks={tasks} onEditTask={(t) => setEditingTask(t)} setView={setView} />
           </div>
         )}
+        {view === "reminders" && (
+          <RemindersView
+            remindersList={remindersList}
+            onSaveReminders={saveReminders}
+            onAddTask={(t) => setTasks(prev => [{ ...t, id: t.id || crypto.randomUUID(), done: false, createdAt: new Date().toISOString() }, ...prev])}
+            loading={remindersLoading}
+            onRefresh={fetchReminders}
+            aiCfg={aiCfg}
+          />
+        )}
       </div>
       {celebration && <Celebration data={celebration} />}
       {searchOpen && <SearchPalette tasks={tasks} onClose={() => setSearchOpen(false)} onEditTask={(t) => setEditingTask(t)} setView={setView} />}
@@ -863,6 +909,7 @@ function Header({ view, setView, weekRange, completedCount, totalCount, syncStat
     { id: "email",      label: "Sunday Email", icon: Mail },
     { id: "settings",   label: "Settings",     icon: SettingsIcon },
     { id: "calendar",   label: "Calendar",     icon: Calendar },
+    { id: "reminders",  label: "Reminders",   icon: Bell },
   ];
   const pct = totalCount === 0 ? 0 : Math.round((completedCount / totalCount) * 100);
   return (
@@ -1428,6 +1475,46 @@ function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, al
   const [phrase, setPhrase] = useState("");
   const update = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const [titleError, setTitleError] = useState(false);
+  const [photoAnalysis, setPhotoAnalysis] = useState(null);
+  const [photoLoading, setPhotoLoading] = useState(false);
+  const [photoError, setPhotoError] = useState("");
+
+  const handlePhotoCapture = useCallback(async (file) => {
+    if (!file || !aiCfg) return;
+    setPhotoLoading(true);
+    setPhotoError("");
+    try {
+      const reader = new FileReader();
+      const base64 = await new Promise((res, rej) => {
+        reader.onload = e => res(e.target.result.split(",")[1]);
+        reader.onerror = rej;
+        reader.readAsDataURL(file);
+      });
+      const result = await analyzePhoto({
+        backendUrl: aiCfg.backendUrl,
+        sharedSecret: aiCfg.sharedSecret,
+        imageBase64: base64,
+        imageMediaType: file.type || "image/jpeg",
+      });
+      if (result.ok) {
+        setPhotoAnalysis(result);
+        // Pre-fill the form fields based on photo analysis
+        setForm(prev => ({
+          ...prev,
+          title: prev.title || result.taskTitle || "",
+          details: (prev.details ? prev.details + "\n\n" : "") + (result.taskDetails || ""),
+          category: result.taskCategory || prev.category || "yard-care",
+          priority: result.taskPriority || prev.priority,
+        }));
+      } else {
+        setPhotoError(result.error || "Analysis failed");
+      }
+    } catch (e) {
+      setPhotoError(e.message);
+    } finally {
+      setPhotoLoading(false);
+    }
+  }, [aiCfg]);
   const submit = () => {
     if (!form.title.trim()) { setTitleError(true); return; }
     setTitleError(false);
@@ -1487,6 +1574,28 @@ function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, al
         <button onClick={onCancel} style={styles.iconBtn}><X size={18} /></button>
       </div>
       <div style={styles.formGrid}>
+        {/* Photo Analyzer */}
+        {aiCfg && (
+          <div style={{ marginBottom: 12, padding: "10px 12px", background: "#F8F4EF", borderRadius: 8, border: "1px solid #E8E0D8" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: photoAnalysis ? 8 : 0 }}>
+              <label htmlFor="photoCapture" style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#6B7280", padding: "5px 10px", background: "#fff", border: "1px solid #D1C9C0", borderRadius: 6 }}>
+                <span style={{ fontSize: 16 }}>📸</span>
+                {photoLoading ? "Analyzing…" : "Photo → Task"}
+              </label>
+              <input id="photoCapture" type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={e => e.target.files[0] && handlePhotoCapture(e.target.files[0])} />
+              {photoAnalysis && <span style={{ fontSize: 12, color: "#059669" }}>✓ {photoAnalysis.identified}</span>}
+              {photoError && <span style={{ fontSize: 12, color: "#DC2626" }}>{photoError}</span>}
+            </div>
+            {photoAnalysis && photoAnalysis.tipsList && photoAnalysis.tipsList.length > 0 && (
+              <ul style={{ margin: "4px 0 0 0", paddingLeft: 18, fontSize: 12, color: "#4B5563" }}>
+                {photoAnalysis.tipsList.slice(0,4).map((tip, i) => <li key={i}>{tip}</li>)}
+              </ul>
+            )}
+            {photoAnalysis && photoAnalysis.urgentIssue && (
+              <div style={{ marginTop: 4, padding: "3px 8px", background: "#FEF2F2", borderRadius: 4, fontSize: 12, color: "#DC2626" }}>⚠️ {photoAnalysis.urgentIssue}</div>
+            )}
+          </div>
+        )}
         <Field label="Title" full>
           <input value={form.title} onChange={(e) => { update("title", e.target.value); if (e.target.value.trim()) setTitleError(false); }}
             placeholder="e.g. File Q1 sales tax" style={{ ...styles.input, ...(titleError ? { borderColor: "#A04848", boxShadow: "0 0 0 2px rgba(160,72,72,0.2)" } : {}) }} />
@@ -2388,6 +2497,209 @@ function Celebration({ data }) {
 }
 
 /* STYLES */
+function RemindersView({ remindersList, onSaveReminders, onAddTask, loading, onRefresh, aiCfg }) {
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const emptyForm = {
+    id: "", name: "", type: "birthday", month: "", day: "", year: "",
+    leadDays: [], giftfulUrl: "", assignedTo: "Anyone", notes: ""
+  };
+  const [form, setFormR] = useState(emptyForm);
+
+  const startNew = () => {
+    setFormR({ ...emptyForm, id: crypto.randomUUID(), leadDays: [...(DEFAULT_LEAD_DAYS["birthday"] || [14,7])] });
+    setEditingId(null);
+    setShowForm(true);
+  };
+
+  const startEdit = (r) => {
+    setFormR({ ...r, leadDays: [...(r.leadDays || [])] });
+    setEditingId(r.id);
+    setShowForm(true);
+  };
+
+  const handleSave = () => {
+    if (!form.name || !form.month || !form.day) return;
+    const updated = editingId
+      ? remindersList.map(r => r.id === editingId ? { ...form } : r)
+      : [...remindersList, { ...form }];
+    onSaveReminders(updated);
+    setShowForm(false);
+    setEditingId(null);
+  };
+
+  const handleDelete = (id) => {
+    onSaveReminders(remindersList.filter(r => r.id !== id));
+  };
+
+  const toggleLeadDay = (day) => {
+    const days = form.leadDays || [];
+    setFormR(prev => ({
+      ...prev,
+      leadDays: days.includes(day) ? days.filter(d => d !== day) : [...days, day].sort((a,b)=>b-a)
+    }));
+  };
+
+  const handleCreateTask = (r) => {
+    const days = daysUntil(r);
+    const t = reminderToTask(r, days);
+    onAddTask(t);
+  };
+
+  const sorted = [...remindersList].sort((a, b) => {
+    const da = daysUntil(a);
+    const db = daysUntil(b);
+    return da - db;
+  });
+
+  const typeEmoji = (type) => REMINDER_TYPES.find(t => t.id === type)?.emoji || "📅";
+  const typeLabel = (type) => REMINDER_TYPES.find(t => t.id === type)?.label || "Event";
+
+  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const LEAD_OPTIONS = [90,60,45,30,21,14,7,3,1];
+
+  return (
+    <div style={{ maxWidth: 640, margin: "0 auto", padding: "16px 16px 80px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#1C170D" }}>🔔 Reminders</h2>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={onRefresh} disabled={loading} style={{ padding: "6px 12px", background: "#F3F0EB", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 13 }}>
+            {loading ? "…" : "↻"}
+          </button>
+          <button onClick={startNew} style={{ padding: "6px 14px", background: "#D4A017", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+            + Add
+          </button>
+        </div>
+      </div>
+
+      {/* Due soon banner */}
+      {(() => {
+        const soon = sorted.filter(r => daysUntil(r) <= 30);
+        if (!soon.length) return null;
+        return (
+          <div style={{ background: "#FEF3C7", border: "1px solid #FCD34D", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 13 }}>
+            <strong>⏰ Coming up:</strong>{" "}
+            {soon.slice(0,3).map(r => {
+              const days = daysUntil(r);
+              return <span key={r.id} style={{ marginRight: 10 }}>{typeEmoji(r.type)} {r.name} in {days}d</span>;
+            })}
+          </div>
+        );
+      })()}
+
+      {/* Add / Edit Form */}
+      {showForm && (
+        <div style={{ background: "#fff", border: "1px solid #E8E0D8", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+          <h3 style={{ margin: "0 0 12px 0", fontSize: 16, fontWeight: 700 }}>{editingId ? "Edit Reminder" : "New Reminder"}</h3>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <div style={{ gridColumn: "1/-1" }}>
+              <label style={labelSt}>Name / Person</label>
+              <input style={inputSt} placeholder="e.g. Mom" value={form.name} onChange={e => setFormR(p=>({...p,name:e.target.value}))} />
+            </div>
+            <div>
+              <label style={labelSt}>Type</label>
+              <select style={inputSt} value={form.type} onChange={e => setFormR(p=>({...p,type:e.target.value,leadDays:[...(DEFAULT_LEAD_DAYS[e.target.value]||[14,7])]}))}>
+                {REMINDER_TYPES.map(t => <option key={t.id} value={t.id}>{t.emoji} {t.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={labelSt}>Year (optional, for age)</label>
+              <input style={inputSt} type="number" placeholder="e.g. 1985" value={form.year} onChange={e => setFormR(p=>({...p,year:e.target.value}))} />
+            </div>
+            <div>
+              <label style={labelSt}>Month</label>
+              <select style={inputSt} value={form.month} onChange={e => setFormR(p=>({...p,month:parseInt(e.target.value)}))}>
+                <option value="">-- Month --</option>
+                {MONTHS.map((m,i) => <option key={i+1} value={i+1}>{m}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={labelSt}>Day</label>
+              <input style={inputSt} type="number" min="1" max="31" placeholder="Day" value={form.day} onChange={e => setFormR(p=>({...p,day:parseInt(e.target.value)}))} />
+            </div>
+            <div style={{ gridColumn: "1/-1" }}>
+              <label style={labelSt}>Remind me (days before)</label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {LEAD_OPTIONS.map(d => (
+                  <button key={d} onClick={() => toggleLeadDay(d)} style={{ padding: "3px 10px", borderRadius: 14, border: "1.5px solid", borderColor: (form.leadDays||[]).includes(d) ? "#D4A017" : "#D1C9C0", background: (form.leadDays||[]).includes(d) ? "#FEF3C7" : "#fff", fontSize: 12, cursor: "pointer", fontWeight: 600 }}>
+                    {d}d
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{ gridColumn: "1/-1" }}>
+              <label style={labelSt}>Giftful Wishlist URL (optional)</label>
+              <input style={inputSt} type="url" placeholder="https://www.giftful.com/..." value={form.giftfulUrl} onChange={e => setFormR(p=>({...p,giftfulUrl:e.target.value}))} />
+            </div>
+            <div style={{ gridColumn: "1/-1" }}>
+              <label style={labelSt}>Notes</label>
+              <input style={inputSt} placeholder="Any extra notes" value={form.notes} onChange={e => setFormR(p=>({...p,notes:e.target.value}))} />
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 14, justifyContent: "flex-end" }}>
+            <button onClick={() => { setShowForm(false); setEditingId(null); }} style={{ padding: "7px 16px", background: "#F3F0EB", border: "none", borderRadius: 6, cursor: "pointer" }}>Cancel</button>
+            <button onClick={handleSave} style={{ padding: "7px 16px", background: "#D4A017", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: 600 }}>Save</button>
+          </div>
+        </div>
+      )}
+
+      {/* Reminder Cards */}
+      {sorted.length === 0 && !showForm && (
+        <div style={{ textAlign: "center", padding: "40px 0", color: "#9CA3AF", fontSize: 14 }}>
+          No reminders yet. Add birthdays, anniversaries, and more.
+        </div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {sorted.map(r => {
+          const days = daysUntil(r);
+          const age = ageThisYear(r);
+          const isUrgent = days <= 14;
+          const next = nextOccurrence(r);
+          return (
+            <div key={r.id} style={{ background: "#fff", border: "1.5px solid " + (isUrgent ? "#FCD34D" : "#E8E0D8"), borderRadius: 10, padding: "12px 14px" }}>
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: "#1C170D" }}>
+                    {typeEmoji(r.type)} {r.name}
+                    {age ? <span style={{ fontWeight: 400, color: "#6B7280", fontSize: 13 }}> · turns {age}</span> : null}
+                  </div>
+                  <div style={{ fontSize: 13, color: "#6B7280", marginTop: 2 }}>
+                    {typeLabel(r.type)} · {MONTHS[r.month-1]} {r.day}
+                    <span style={{ marginLeft: 8, fontWeight: 600, color: isUrgent ? "#D97706" : "#4B5563" }}>
+                      {days === 0 ? "🎉 Today!" : days + " days away"}
+                    </span>
+                  </div>
+                  {r.giftfulUrl && (
+                    <a href={r.giftfulUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: "#D4A017", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 3, marginTop: 3 }}>
+                      🎁 Giftful Wishlist
+                    </a>
+                  )}
+                  {(r.leadDays || []).length > 0 && (
+                    <div style={{ fontSize: 11, color: "#9CA3AF", marginTop: 2 }}>
+                      Remind: {(r.leadDays).join(", ")} days before
+                    </div>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 6, marginLeft: 8 }}>
+                  <button onClick={() => handleCreateTask(r)} title="Add task to ledger" style={{ padding: "4px 8px", background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 6, cursor: "pointer", fontSize: 12, color: "#059669" }}>
+                    + Task
+                  </button>
+                  <button onClick={() => startEdit(r)} title="Edit" style={{ padding: "4px 8px", background: "#F3F0EB", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12 }}>✏️</button>
+                  <button onClick={() => handleDelete(r.id)} title="Delete" style={{ padding: "4px 8px", background: "#FEF2F2", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, color: "#DC2626" }}>✕</button>
+                </div>
+              </div>
+              {r.notes && <div style={{ marginTop: 6, fontSize: 12, color: "#6B7280", fontStyle: "italic" }}>{r.notes}</div>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+const labelSt = { display: "block", fontSize: 12, fontWeight: 600, color: "#6B7280", marginBottom: 4 };
+const inputSt = { width: "100%", padding: "7px 10px", borderRadius: 6, border: "1.5px solid #D1C9C0", fontSize: 14, boxSizing: "border-box", outline: "none" };
+
 function FontStyles() {
   return (
     <style>{`
