@@ -2964,8 +2964,8 @@ function TodayView({ digest, digestLoading, digestError, digestDate, onGenerate,
                                 {isDone ? "✓" : ""}
                               </button>
                             )}
-                          </div>div>
-                </div>div>
+                          </div></div>
+                </div>
               );
   }
 
@@ -2985,7 +2985,7 @@ function TodayView({ digest, digestLoading, digestError, digestDate, onGenerate,
                                       <span style={{ fontSize: 12, color: "#8A8579" }}>
                                         {(list.main || []).length} tasks · {(list.bonus || []).length} bonus
                                       </span>
-                          </div></div>div>
+                          </div></div>
                   {(list.main || []).map((t, i) => <TaskCard key={t.id || i} t={t} isBonus={false} />)}
                   {(list.bonus || []).length > 0 && (
                             <div style={{ marginTop: 8 }}>
@@ -2995,7 +2995,7 @@ function TodayView({ digest, digestLoading, digestError, digestDate, onGenerate,
                               {(list.bonus || []).map((t, i) => <TaskCard key={t.id || i} t={t} isBonus={true} />)}
                             </div></div>
                           )}
-                </div>div>
+                </div>
               );
   }
 
