@@ -509,35 +509,40 @@ export default function FamilyLedger() {
     setGoogleLoading(false);
   }, [settings.backendUrl, settings.sharedSecret]);
 
+  
+
   // ── Reminders state ──────────────────────────────────────────────
   const [remindersList, setRemindersList] = useState(() => loadRemindersLocal());
   const [remindersLoading, setRemindersLoading] = useState(false);
   const [dueReminderTasks, setDueReminderTasks] = useState([]);
 
   const fetchReminders = useCallback(async () => {
-    if (!backendUrl || !sharedSecret) return;
+    const bu = settings.backendUrl || ENV_BACKEND_URL;
+    const ss = settings.sharedSecret;
+    if (!bu || !ss) return;
     setRemindersLoading(true);
     try {
-      const result = await loadRemindersFromBackend({ backendUrl, sharedSecret });
+      const result = await loadRemindersFromBackend({ backendUrl: bu, sharedSecret: ss });
       setRemindersList(result);
       const due = getDueReminders(result);
       setDueReminderTasks(due.map(d => reminderToTask(d.reminder, d.daysUntil)));
     } finally {
       setRemindersLoading(false);
     }
-  }, [backendUrl, sharedSecret]);
+  }, [settings]);
 
   const saveReminders = useCallback(async (newList) => {
+    const bu = settings.backendUrl || ENV_BACKEND_URL;
+    const ss = settings.sharedSecret;
     setRemindersList(newList);
     saveRemindersLocal(newList);
-    if (backendUrl && sharedSecret) {
-      await saveRemindersToBackend({ backendUrl, sharedSecret, reminders: newList });
+    if (bu && ss) {
+      await saveRemindersToBackend({ backendUrl: bu, sharedSecret: ss, reminders: newList });
     }
-  }, [backendUrl, sharedSecret]);
+  }, [settings]);
 
   // Load reminders on mount
   useEffect(() => { fetchReminders(); }, [fetchReminders]);
-
 
 
   async function persistLocal(nextTasks) {
