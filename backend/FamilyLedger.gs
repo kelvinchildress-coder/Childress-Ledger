@@ -4,7 +4,7 @@
  *
  * Paste this whole file into your Google Apps Script project, bound to
  * your Family Ledger Google Sheet (Extensions → Apps Script).
- *
+ *h
  * Required Script Properties (Project Settings → Script Properties):
  *   ANTHROPIC_API_KEY   (optional) — enables ?action=ai for AI features
  *   SHARED_SECRET       (optional) — if set, all requests must include &secret=...
@@ -70,6 +70,7 @@ function doPost(e) {
     if (action === "subscribe-push")  return jsonOut_(registerSub_(body));
     if (action === "google-search") return jsonOut_(googleSearch_(body));
     if (action === "save-reminders")  return jsonOut_(saveReminders_(body));
+    if (action === "daily-digest")  return jsonOut_(handleDailyDigest_(body));
     return jsonOut_({ error: "Unknown action: " + action });
   } catch (err) {
     return jsonOut_({ error: String(err && err.message || err) });
@@ -658,7 +659,7 @@ function setupTriggers_() {
   ScriptApp.newTrigger("processReplies").timeBased()
     .everyMinutes(10).create();
 
-  ScriptApp.newTrigger("sendDailyDigest").timeBased()
+  ScriptApp.newTrigger("sendDailyDigestEmail").timeBased()
     .everyDays(1).atHour(20).create();
 }
 
@@ -902,4 +903,188 @@ function saveReminders_(body) {
   } catch (e) {
     return { error: e.message };
   }
+}
+
+/* =========================================================================
+ * SMART DAILY DIGEST — AI-prioritized 5+2 task list per person
+ * Triggered daily at 8pm via time-based trigger AND callable via POST
+ * action=daily-digest for on-demand generation in the PWA.
+ * ========================================================================= */
+
+/**
+ * POST { action: "daily-digest" }
+ * Returns the AI-generated digest JSON without sending email.
+ * Used by the "Today's Tasks" view in the PWA.
+ */
+function handleDailyDigest_(body) {
+  const loaded = loadAll_();
+  const settings = getSettings_();
+  const assignees = (settings.parentNames || ["Kelvin", "Enrique"]).slice(0, 2);
+  const todayStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+
+  const openTasks = loaded.tasks.filter(function(t) {
+    if (t.snoozedUntil && t.snoozedUntil > todayStr) return false;
+    const hist = t.completionHistory || [];
+    if (hist.indexOf(todayStr) >= 0) return false;
+    return true;
+  });
+
+  const taskSummary = openTasks.map(function(t) {
+    const dl = t.deadline ? Math.round((new Date(t.deadline) - new Date(todayStr)) / 86400000) : null;
+    return {
+      id: t.id, title: t.title, category: t.category,
+      assignedTo: t.assignedTo, priority: t.priority,
+      frequency: t.frequency, deadline: t.deadline || null,
+      daysUntilDeadline: dl, lastCompleted: t.lastCompleted || null,
+      details: (t.details || "").substring(0, 120),
+    };
+  });
+
+  const prompt = "Today is " + todayStr + ". You are the family task coordinator for the Childress household.\n\n" +
+    "Family members: " + assignees.join(", ") + "\n\n" +
+    "Here are all open tasks (JSON array):\n" + JSON.stringify(taskSummary) + "\n\n" +
+    "Your job:\n" +
+    "1. For EACH family member, select exactly 5 main tasks they should do TODAY and up to 2 bonus tasks.\n" +
+    "2. Main tasks: overdue or due soon first, then high-priority, then variety across categories.\n" +
+    "3. Bonus tasks: non-urgent but beneficial items.\n" +
+    "4. Do NOT assign the same heavy task to both people on the same day.\n" +
+    "5. For tasks assigned 'Anyone', assign to the person with fewer tasks.\n" +
+    "6. For tasks without a deadline, suggest a smart deadline in deadlineUpdates.\n" +
+    "7. Include a brief whyToday (1 sentence) for each task.\n\n" +
+    "Return ONLY valid JSON:\n" +
+    '{"digest":{"' + assignees[0] + '":{"main":[{"id":"...","title":"...","category":"...","priority":"...","deadline":"YYYY-MM-DD","whyToday":"..."}],"bonus":[]},"' +
+    assignees[1] + '":{"main":[],"bonus":[]}},' +
+    '"deadlineUpdates":[{"id":"...","suggestedDeadline":"YYYY-MM-DD"}]}';
+
+  const aiResult = aiProxy_({
+    prompt: prompt,
+    system: "You are a precise family task coordinator. Return valid JSON only.",
+    max_tokens: 1400,
+  });
+
+  if (aiResult.error) return { ok: false, error: aiResult.error };
+
+  const text = aiResult.text || "";
+  let parsed = null;
+  try { parsed = JSON.parse(text); } catch(e1) {
+    const first = text.indexOf("{"); const last = text.lastIndexOf("}");
+    if (first >= 0 && last > first) {
+      try { parsed = JSON.parse(text.slice(first, last + 1)); } catch(e2) {}
+    }
+  }
+
+  if (!parsed || !parsed.digest) return { ok: false, error: "Could not parse AI response", raw: text };
+
+  return { ok: true, digest: parsed.digest, deadlineUpdates: parsed.deadlineUpdates || [], today: todayStr };
+}
+
+/**
+ * Time-based trigger: runs daily at 8pm.
+ * Generates AI digest and emails EACH person their own list + a peek at the other's list.
+ */
+function sendDailyDigestEmail() {
+  const loaded = loadAll_();
+  const settings = getSettings_();
+  const emails = settings.parentEmails || [];
+  const names = (settings.parentNames || ["Kelvin", "Enrique"]).slice(0, 2);
+
+  if (emails.length === 0) { Logger.log("No parentEmails configured; skipping daily digest."); return; }
+
+  const result = handleDailyDigest_({});
+  if (!result.ok) { Logger.log("Daily digest AI failed: " + result.error); return; }
+
+  const digest = result.digest;
+  const today = result.today;
+  const todayFormatted = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "EEEE, MMMM d");
+
+  // Send each person their personalized email
+  names.forEach(function(name, idx) {
+    const email = emails[idx];
+    if (!email) return;
+
+    const myList = digest[name] || { main: [], bonus: [] };
+    const otherName = names[1 - idx] || "";
+    const otherList = digest[otherName] || { main: [], bonus: [] };
+
+    const subject = "Your Family Ledger for " + todayFormatted + " — " + myList.main.length + " tasks";
+    const html = buildDailyDigestHtml_(name, myList, otherName, otherList, todayFormatted);
+    const text = buildDailyDigestText_(name, myList, otherName, otherList, todayFormatted);
+
+    MailApp.sendEmail({ to: email, subject: subject, body: text, htmlBody: html, name: "The Family Ledger" });
+  });
+
+  // Also apply any suggested deadline updates back to the sheet
+  const updates = result.deadlineUpdates || [];
+  if (updates.length > 0) {
+    let dirty = false;
+    updates.forEach(function(u) {
+      const task = loaded.tasks.find(function(t) { return t.id === u.id; });
+      if (task && !task.deadline && u.suggestedDeadline) {
+        task.deadline = u.suggestedDeadline;
+        task.lastModified = Date.now();
+        dirty = true;
+      }
+    });
+    if (dirty) saveAll_({ tasks: loaded.tasks });
+  }
+
+  sendPushToAll_({
+    title: "Today's task list is ready",
+    body: "Check your personalized Family Ledger for today.",
+    url: "/?view=today",
+    tag: "daily-digest",
+  });
+}
+
+function buildDailyDigestHtml_(myName, myList, otherName, otherList, todayFormatted) {
+  function taskRow(t, isBonus) {
+    const prioColor = t.priority === "high" ? "#C9603C" : t.priority === "low" ? "#8A8579" : "#1B2C3A";
+    const dl = t.deadline ? ' <span style="color:#8A8579;font-size:12px">· due ' + formatDate_(t.deadline) + '</span>' : "";
+    const why = t.whyToday ? '<div style="font-size:12px;color:#6B6B6B;margin-top:2px;font-style:italic">' + escapeHtml_(t.whyToday) + '</div>' : "";
+    const badge = isBonus ? ' <span style="background:#E5DFD3;color:#6B6B6B;font-size:10px;padding:1px 5px;border-radius:3px">bonus</span>' : "";
+    return '<li style="margin:10px 0;padding:8px;background:#fff;border-radius:6px;border-left:3px solid ' + prioColor + '">' +
+      '<strong style="color:' + prioColor + '">' + escapeHtml_(t.title) + '</strong>' + badge + dl + why + '</li>';
+  }
+
+  const mainItems = (myList.main || []).map(function(t) { return taskRow(t, false); }).join("");
+  const bonusItems = (myList.bonus || []).map(function(t) { return taskRow(t, true); }).join("");
+  const otherItems = (otherList.main || []).slice(0, 5).map(function(t) {
+    return '<li style="margin:6px 0;color:#6B6B6B">' + escapeHtml_(t.title) + '</li>';
+  }).join("");
+
+  return '<div style="font-family:Helvetica,Arial,sans-serif;color:#1B2C3A;background:#FAF7F2;padding:24px;max-width:640px">' +
+    '<div style="font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#8A8579">The Family Ledger</div>' +
+    '<h1 style="font-family:Georgia,serif;font-weight:500;margin:6px 0 4px">Good morning, ' + escapeHtml_(myName) + '!</h1>' +
+    '<p style="color:#8A8579;margin:0 0 20px">' + escapeHtml_(todayFormatted) + '</p>' +
+    '<h2 style="font-family:Georgia,serif;font-size:18px;margin:0 0 10px">Your 5 tasks for today</h2>' +
+    '<ol style="padding-left:20px;margin:0 0 16px">' + mainItems + '</ol>' +
+    (bonusItems ? '<h3 style="font-size:14px;color:#8A8579;margin:16px 0 8px">Bonus (if you have time)</h3>' +
+      '<ul style="padding-left:20px;margin:0 0 20px">' + bonusItems + '</ul>' : '') +
+    (otherItems ? '<div style="background:#E5DFD3;padding:12px 16px;border-radius:6px;margin-top:16px">' +
+      '<strong style="font-size:13px">' + escapeHtml_(otherName) + '\'s list today:</strong>' +
+      '<ul style="padding-left:18px;margin:6px 0 0">' + otherItems + '</ul></div>' : '') +
+    '<hr style="border:none;border-top:1px solid #E5DFD3;margin:24px 0">' +
+    '<p style="font-size:12px;color:#8A8579">Open the app to mark tasks complete: <a href="https://childress-ledger.vercel.app/?view=today">View Today\'s Tasks</a></p>' +
+    '</div>';
+}
+
+function buildDailyDigestText_(myName, myList, otherName, otherList, todayFormatted) {
+  const lines = ["Good morning, " + myName + "!", todayFormatted, "", "YOUR TASKS FOR TODAY:", ""];
+  (myList.main || []).forEach(function(t, i) {
+    lines.push((i + 1) + ". " + t.title + (t.deadline ? " (due " + t.deadline + ")" : "") + (t.whyToday ? " — " + t.whyToday : ""));
+  });
+  if ((myList.bonus || []).length > 0) {
+    lines.push("", "BONUS TASKS (if you have time):");
+    (myList.bonus || []).forEach(function(t) {
+      lines.push("• " + t.title);
+    });
+  }
+  if ((otherList.main || []).length > 0) {
+    lines.push("", otherName.toUpperCase() + "'S LIST TODAY:");
+    (otherList.main || []).slice(0, 5).forEach(function(t, i) {
+      lines.push((i + 1) + ". " + t.title);
+    });
+  }
+  lines.push("", "Open the app: https://childress-ledger.vercel.app/?view=today");
+  return lines.join("\n");
 }
