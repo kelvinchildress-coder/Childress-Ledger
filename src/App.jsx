@@ -886,6 +886,19 @@ export default function FamilyLedger() {
             aiCfg={aiCfg}
           />
         )}
+        {view === "today" && (
+                <TodayView
+                              digest={todayDigest}
+                              digestLoading={digestLoading}
+                              digestError={digestError}
+                              digestDate={digestDate}
+                              onGenerate={generateDigest}
+                              tasks={tasks}
+                              onToggle={toggleComplete}
+                              currentUser={identity ? identity.name : ""}
+                              settings={settings}
+                            />
+              )}
       </div>
       {celebration && <Celebration data={celebration} />}
       {searchOpen && <SearchPalette tasks={tasks} onClose={() => setSearchOpen(false)} onEditTask={(t) => setEditingTask(t)} setView={setView} />}
@@ -2933,23 +2946,23 @@ function TodayView({ digest, digestLoading, digestError, digestDate, onGenerate,
                                                                                                   textDecoration: isDone ? "line-through" : "none" }}>{t.title}</span>span>
                                                       {isBonus && <span style={{ fontSize: 10, background: "#E5DFD3", color: "#6B6B6B",
                                                                                                 padding: "1px 5px", borderRadius: 3 }}>bonus</span>span>}
-                                                    </div>div>
+                                                    </div>
                                         {t.whyToday && <div style={{ fontSize: 12, color: "#8A8579", fontStyle: "italic", marginBottom: 4 }}>{t.whyToday}</div>div>}
                                                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                                                                     <PriorityBadge priority={t.priority} />
                                                       {t.category && <span style={{ fontSize: 11, color: "#8A8579" }}>{t.category}</span>span>}
                                                       {t.deadline && <span style={{ fontSize: 11, color: new Date(t.deadline) < new Date() ? "#C9603C" : "#8A8579" }}>
                                                                         due {t.deadline}
-                                                      </span>span>}
-                                                    </div>div>
-                                      </div>div>
+                                                      </span>
+                                                    </div>
+                                      </div></div>
                             {fullTask && (
                               <button onClick={() => onToggle(fullTask.id)}
                                               style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 14, border: "2px solid",
                                                                       borderColor: isDone ? "#5C7A3F" : "#D0CBB8", background: isDone ? "#5C7A3F" : "transparent",
                                                                       cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>
                                 {isDone ? "✓" : ""}
-                              </button>button>
+                              </button>
                             )}
                           </div>div>
                 </div>div>
@@ -2965,22 +2978,22 @@ function TodayView({ digest, digestLoading, digestError, digestDate, onGenerate,
                                                                color: isMe ? "#FAF7F2" : "#1B2C3A", display: "flex", alignItems: "center",
                                                                justifyContent: "center", fontWeight: 700, fontSize: 14 }}>
                                         {(name || "?")[0]}
-                                      </div>div>
+                                      </div>
                                       <h3 style={{ margin: 0, fontFamily: "Georgia,serif", fontWeight: 500, fontSize: 17, color: "#1B2C3A" }}>
                                         {name}{isMe ? " (you)" : ""}
-                                      </h3>h3>
+                                      </h3>
                                       <span style={{ fontSize: 12, color: "#8A8579" }}>
                                         {(list.main || []).length} tasks · {(list.bonus || []).length} bonus
-                                      </span>span>
-                          </div>div>
+                                      </span>
+                          </div></div>div>
                   {(list.main || []).map((t, i) => <TaskCard key={t.id || i} t={t} isBonus={false} />)}
                   {(list.bonus || []).length > 0 && (
                             <div style={{ marginTop: 8 }}>
                                           <div style={{ fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "#8A8579", marginBottom: 6 }}>
                                                           Bonus — if you have time
-                                          </div>div>
+                                          </div>
                               {(list.bonus || []).map((t, i) => <TaskCard key={t.id || i} t={t} isBonus={true} />)}
-                            </div>div>
+                            </div></div>
                           )}
                 </div>div>
               );
@@ -2991,26 +3004,26 @@ function TodayView({ digest, digestLoading, digestError, digestDate, onGenerate,
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
                           <div>
                                     <h2 style={{ margin: 0, fontFamily: "Georgia,serif", fontWeight: 500, fontSize: 22, color: "#1B2C3A" }}>
-                                                Today's Tasks
-                                    </h2>h2>
+                                                Today's Ta
+                                    </h2>
                             {digestDate && <div style={{ fontSize: 12, color: "#8A8579", marginTop: 2 }}>
                               {isStale ? "⚠ From " + digestDate + " — regenerate?" : "Generated for " + digestDate}
-                            </div>div>}
-                          </div>div>
-                        <button onClick={onGenerate} disabled={digestLoading}
+                            </div>}
+                          </div>
+                        <button onClick={onGenerate} disabled={digestLoad
                                     style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px",
                                                         background: "#1B2C3A", color: "#FAF7F2", border: "none", borderRadius: 6,
                                                         fontSize: 13, fontWeight: 500, cursor: digestLoading ? "not-allowed" : "pointer", opacity: digestLoading ? 0.7 : 1 }}>
                                   <ListChecks size={14} />
                           {digestLoading ? "Generating…" : digest ? "Refresh" : "Generate"}
-                        </button>button>
-                </div>div>
+                        </button>
+                </div>
         
           {digestError && (
                   <div style={{ background: "#FFF0ED", border: "1px solid #F0C0B0", borderRadius: 6, padding: "10px 14px",
                                          color: "#C9603C", fontSize: 13, marginBottom: 16 }}>
                             ⚠ {digestError}
-                  </div>div>
+                  </div>
               )}
         
           {!digest && !digestLoading && !digestError && (
