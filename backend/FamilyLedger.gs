@@ -51,6 +51,7 @@ function doGet(e) {
     if (action === "load") return jsonOut_(loadAll_());
     if (action === "ics")  return icsOut_(buildIcs_());
     if (action === "google-import") return jsonOut_(googleImport_(e));
+    if (action === "get-reminders")   return jsonOut_(getReminders_());
     return jsonOut_({ error: "Unknown action: " + action });
   } catch (err) {
     return jsonOut_({ error: String(err && err.message || err) });
@@ -68,6 +69,7 @@ function doPost(e) {
     if (action === "ai")              return jsonOut_(aiProxy_(body));
     if (action === "subscribe-push")  return jsonOut_(registerSub_(body));
     if (action === "google-search") return jsonOut_(googleSearch_(body));
+    if (action === "save-reminders")  return jsonOut_(saveReminders_(body));
     return jsonOut_({ error: "Unknown action: " + action });
   } catch (err) {
     return jsonOut_({ error: String(err && err.message || err) });
@@ -486,7 +488,20 @@ function aiProxy_(body) {
     model: ANTHROPIC_MODEL,
     max_tokens: Math.min(body.max_tokens || 600, 1500),
     system: body.system || "You are a helpful family-operations assistant.",
-    messages: [{ role: "user", content: body.prompt || "" }],
+    messages: [{
+      role: "user",
+      content: body.imageBase64
+        ? [
+            { type: "image", source: { type: "base64", media_type: body.imageMediaType || "image/jpeg", data: body.imageBase64 } },
+            { type: "text", text: body.prompt || "" }
+          ]
+        : (body.prompt || "")
+    }],
+      ? [
+          { type: "image", source: { type: "base64", media_type: body.imageMediaType || "image/jpeg", data: body.imageBase64 } },
+          { type: "text", text: body.prompt || "" }
+        ]
+      : (body.prompt || "") }],
   };
 
   const res = UrlFetchApp.fetch("https://api.anthropic.com/v1/messages", {
@@ -841,4 +856,50 @@ function googleSearch_(body) {
   }
 
   return results;
+}
+
+
+// ── Reminders ─────────────────────────────────────────────────────
+function getReminders_() {
+  try {
+    const sheets = ensureSheets_();
+    const sh = sheets.reminders;
+    if (!sh) return { reminders: [] };
+    const data = sh.getDataRange().getValues();
+    if (data.length <= 1) return { reminders: [] };
+    const headers = data[0];
+    const reminders = data.slice(1).map(row => {
+      const obj = {};
+      headers.forEach((h, i) => { obj[h] = row[i]; });
+      try { obj.leadDays = JSON.parse(obj.leadDays || "[]"); } catch { obj.leadDays = []; }
+      return obj;
+    });
+    return { reminders };
+  } catch (e) {
+    return { error: e.message, reminders: [] };
+  }
+}
+
+function saveReminders_(body) {
+  try {
+    const reminders = body.reminders || [];
+    const sheets = ensureSheets_();
+    // Ensure reminders sheet exists
+    let sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Reminders");
+    if (!sh) sh = SpreadsheetApp.getActiveSpreadsheet().insertSheet("Reminders");
+    sh.clearContents();
+    const headers = ["id","name","type","month","day","year","leadDays","giftfulUrl","assignedTo","notes"];
+    sh.appendRow(headers);
+    reminders.forEach(r => {
+      sh.appendRow([
+        r.id || "", r.name || "", r.type || "custom",
+        r.month || 1, r.day || 1, r.year || "",
+        JSON.stringify(r.leadDays || []),
+        r.giftfulUrl || "", r.assignedTo || "", r.notes || ""
+      ]);
+    });
+    return { ok: true, count: reminders.length };
+  } catch (e) {
+    return { error: e.message };
+  }
 }
