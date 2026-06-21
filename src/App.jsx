@@ -18,7 +18,7 @@ import {
 import {
   loadRemindersFromBackend, saveRemindersToBackend,
   loadRemindersLocal, saveRemindersLocal,
-  getDueReminders, reminderToTask, nextOccurrence, daysUntil, ageThisYear,
+  getDueReminders, reminderToTask, nextOccurrence, daysUntil as reminderDaysUntil, ageThisYear,
   REMINDER_TYPES, DEFAULT_LEAD_DAYS,
 } from "./reminders.js";
 import {
@@ -2541,14 +2541,14 @@ function RemindersView({ remindersList, onSaveReminders, onAddTask, loading, onR
   };
 
   const handleCreateTask = (r) => {
-    const days = daysUntil(r);
+    const days = reminderDaysUntil(r);
     const t = reminderToTask(r, days);
     onAddTask(t);
   };
 
   const sorted = [...remindersList].sort((a, b) => {
-    const da = daysUntil(a);
-    const db = daysUntil(b);
+    const da = reminderDaysUntil(a);
+    const db = reminderDaysUntil(b);
     return da - db;
   });
 
@@ -2574,13 +2574,13 @@ function RemindersView({ remindersList, onSaveReminders, onAddTask, loading, onR
 
       {/* Due soon banner */}
       {(() => {
-        const soon = sorted.filter(r => daysUntil(r) <= 30);
+        const soon = sorted.filter(r => reminderDaysUntil(r) <= 30);
         if (!soon.length) return null;
         return (
           <div style={{ background: "#FEF3C7", border: "1px solid #FCD34D", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 13 }}>
             <strong>⏰ Coming up:</strong>{" "}
             {soon.slice(0,3).map(r => {
-              const days = daysUntil(r);
+              const days = reminderDaysUntil(r);
               return <span key={r.id} style={{ marginRight: 10 }}>{typeEmoji(r.type)} {r.name} in {days}d</span>;
             })}
           </div>
@@ -2651,7 +2651,7 @@ function RemindersView({ remindersList, onSaveReminders, onAddTask, loading, onR
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {sorted.map(r => {
-          const days = daysUntil(r);
+          const days = reminderDaysUntil(r);
           const age = ageThisYear(r);
           const isUrgent = days <= 14;
           const next = nextOccurrence(r);
