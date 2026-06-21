@@ -254,3 +254,82 @@ export async function brainstormTasks({ backendUrl, sharedSecret, conversation, 
   }
   return normalizeBrainstormResponse(parsed, { categories, frequencies, assignees });
 }
+
+
+/**
+ * analyzePhoto — sends an image (base64) to Claude vision for plant/tree/object
+ * identification and returns care tips or relevant task suggestions.
+ *
+ * @param {object} opts
+ * @param {string} opts.backendUrl
+ * @param {string} opts.sharedSecret
+ * @param {string} opts.imageBase64    — base64-encoded image data (no data: prefix)
+ * @param {string} [opts.imageMediaType] — e.g. "image/jpeg" or "image/png"
+ * @param {string} [opts.context]      — optional text hint from user
+ * @returns {Promise<{title, details, category, ok, raw}>}
+ */
+export async function analyzePhoto({ backendUrl, sharedSecret, imageBase64, imageMediaType = "image/jpeg", context = "" }) {
+  const prompt = [
+    "Please analyze this image and identify what is shown.",
+    context ? `Additional context from user: ${context}` : "",
+    "",
+    "If this is a plant, tree, or yard/garden element:",
+    "1. Identify the species (or likely species) as specifically as possible.",
+    "2. Provide 3-5 specific care tips relevant right now (watering, pruning, fertilizing, pest watch, etc.).",
+    "3. Flag any urgent issues visible (disease, pests, drought stress).",
+    "",
+    "If this is NOT a plant/yard element, describe what it is and suggest any relevant household maintenance tasks.",
+    "",
+    "Respond in this exact JSON format (no markdown code fences):",
+    JSON.stringify({
+      identified: "<species or object name>",
+      confidence: "high|medium|low",
+      taskTitle: "<short actionable task title for the Family Ledger>",
+      taskDetails: "<2-4 sentences of care tips or action details>",
+      taskCategory: "yard-care",
+      taskPriority: "medium",
+      urgentIssue: "<describe urgent issue or empty string>",
+      tipsList: ["tip 1", "tip 2", "tip 3"]
+    }, null, 2)
+  ].filter(Boolean).join("\n");
+
+  try {
+    const res = await fetch(backendUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "ai",
+        secret: sharedSecret,
+        prompt,
+        imageBase64,
+        imageMediaType,
+        max_tokens: 800,
+        system: "You are a knowledgeable horticulturist and household maintenance expert. Always respond with valid JSON only — no markdown, no code fences.",
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const raw = data.content || data.text || "";
+    let parsed;
+    try {
+      // Strip any accidental markdown fences
+      const cleaned = raw.replace(/^```[a-z]*\n?/i, "").replace(/\n?```$/i, "").trim();
+      parsed = JSON.parse(cleaned);
+    } catch {
+      // Fallback: extract what we can
+      parsed = {
+        identified: "Unknown plant/object",
+        confidence: "low",
+        taskTitle: "Inspect and identify yard element",
+        taskDetails: raw.slice(0, 300),
+        taskCategory: "yard-care",
+        taskPriority: "medium",
+        urgentIssue: "",
+        tipsList: [],
+      };
+    }
+    return { ok: true, ...parsed, raw };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
