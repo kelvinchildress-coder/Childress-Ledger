@@ -2915,141 +2915,141 @@ const styles = {
 
 /* ===== TODAY'S TASKS VIEW ===== */
 function TodayView({ digest, digestLoading, digestError, digestDate, onGenerate, tasks, onToggle, currentUser, settings }) {
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const isStale = digestDate && digestDate !== todayStr;
-    const assignees = (settings.parentNames || []).filter(Boolean);
-    if (assignees.length === 0) { assignees.push("Kelvin", "Enrique"); }
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const isStale = digestDate && digestDate !== todayStr;
+  const assignees = (settings.parentNames || []).filter(Boolean);
+  if (assignees.length === 0) { assignees.push("Kelvin", "Enrique"); }
 
   function PriorityBadge({ priority }) {
-        const colors = { high: "#C9603C", medium: "#8B6F2F", low: "#8A8579" };
-        return priority ? (
-                <span style={{ fontSize: 11, fontWeight: 600, color: colors[priority] || "#8A8579",
-                                      background: "#FAF7F2", border: "1px solid currentColor", borderRadius: 3, padding: "1px 5px" }}>
-                  {priority}
-                </span>span>
-              ) : null;
+    const colors = { high: "#C9603C", medium: "#8B6F2F", low: "#8A8579" };
+    return priority ? (
+      <span style={{ fontSize: 11, fontWeight: 600, color: colors[priority] || "#8A8579",
+                     background: "#FAF7F2", border: "1px solid currentColor", borderRadius: 3, padding: "1px 5px" }}>
+        {priority}
+      </span>
+    ) : null;
   }
 
   function TaskCard({ t, isBonus }) {
-        const fullTask = tasks.find(task => task.id === t.id);
-        const isDone = fullTask && (fullTask.completionHistory || []).includes(todayStr);
-        return (
-                <div style={{ background: "#fff", borderRadius: 8, padding: "12px 14px", marginBottom: 8,
-                                     border: isDone ? "1px solid #E5DFD3" : "1px solid #D0CBB8",
-                                     borderLeft: isBonus ? "3px solid #E5DFD3" : isDone ? "3px solid #5C7A3F" : "3px solid #C9603C",
-                                     opacity: isDone ? 0.65 : 1 }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
-                                      <div style={{ flex: 1 }}>
-                                                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
-                                                      {isDone && <span style={{ fontSize: 13, color: "#5C7A3F" }}>✓</span>span>}
-                                                                    <span style={{ fontWeight: 600, fontSize: 14, color: isDone ? "#8A8579" : "#1B2C3A",
-                                                                                                  textDecoration: isDone ? "line-through" : "none" }}>{t.title}</span>span>
-                                                      {isBonus && <span style={{ fontSize: 10, background: "#E5DFD3", color: "#6B6B6B",
-                                                                                                padding: "1px 5px", borderRadius: 3 }}>bonus</span>span>}
-                                                    </div>
-                                        {t.whyToday && <div style={{ fontSize: 12, color: "#8A8579", fontStyle: "italic", marginBottom: 4 }}>{t.whyToday}</div>div>}
-                                                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                                                                    <PriorityBadge priority={t.priority} />
-                                                      {t.category && <span style={{ fontSize: 11, color: "#8A8579" }}>{t.category}</span>span>}
-                                                      {t.deadline && <span style={{ fontSize: 11, color: new Date(t.deadline) < new Date() ? "#C9603C" : "#8A8579" }}>
-                                                                        due {t.deadline}
-                                                      </span>
-                                                    </div>
-                                      </div></div>
-                            {fullTask && (
-                              <button onClick={() => onToggle(fullTask.id)}
-                                              style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 14, border: "2px solid",
-                                                                      borderColor: isDone ? "#5C7A3F" : "#D0CBB8", background: isDone ? "#5C7A3F" : "transparent",
-                                                                      cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>
-                                {isDone ? "✓" : ""}
-                              </button>
-                            )}
-                          </div></div>
-                </div>
-              );
+    const fullTask = tasks.find(task => task.id === t.id);
+    const isDone = fullTask && (fullTask.completionHistory || []).includes(todayStr);
+    return (
+      <div style={{ background: "#fff", borderRadius: 8, padding: "12px 14px", marginBottom: 8,
+                    border: isDone ? "1px solid #E5DFD3" : "1px solid #D0CBB8",
+                    borderLeft: isBonus ? "3px solid #E5DFD3" : isDone ? "3px solid #5C7A3F" : "3px solid #C9603C",
+                    opacity: isDone ? 0.65 : 1 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+              {isDone && <span style={{ fontSize: 13, color: "#5C7A3F" }}>✓</span>}
+              <span style={{ fontWeight: 600, fontSize: 14, color: isDone ? "#8A8579" : "#1B2C3A",
+                             textDecoration: isDone ? "line-through" : "none" }}>{t.title}</span>
+              {isBonus && <span style={{ fontSize: 10, background: "#E5DFD3", color: "#6B6B6B",
+                                        padding: "1px 5px", borderRadius: 3 }}>bonus</span>}
+            </div>
+            {t.whyToday && <div style={{ fontSize: 12, color: "#8A8579", fontStyle: "italic", marginBottom: 4 }}>{t.whyToday}</div>}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              <PriorityBadge priority={t.priority} />
+              {t.category && <span style={{ fontSize: 11, color: "#8A8579" }}>{t.category}</span>}
+              {t.deadline && <span style={{ fontSize: 11, color: new Date(t.deadline) < new Date() ? "#C9603C" : "#8A8579" }}>
+                due {t.deadline}
+              </span>}
+            </div>
+          </div>
+          {fullTask && (
+            <button onClick={() => onToggle(fullTask.id)}
+                    style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 14, border: "2px solid",
+                             borderColor: isDone ? "#5C7A3F" : "#D0CBB8", background: isDone ? "#5C7A3F" : "transparent",
+                             cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, color: isDone ? "#fff" : "transparent" }}>
+              {isDone ? "✓" : ""}
+            </button>
+          )}
+        </div>
+      </div>
+    );
   }
 
   function PersonSection({ name, list }) {
-        const isMe = name === currentUser;
-        return (
-                <div style={{ marginBottom: 24 }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-                                      <div style={{ width: 32, height: 32, borderRadius: 16, background: isMe ? "#1B2C3A" : "#E5DFD3",
-                                                               color: isMe ? "#FAF7F2" : "#1B2C3A", display: "flex", alignItems: "center",
-                                                               justifyContent: "center", fontWeight: 700, fontSize: 14 }}>
-                                        {(name || "?")[0]}
-                                      </div>
-                                      <h3 style={{ margin: 0, fontFamily: "Georgia,serif", fontWeight: 500, fontSize: 17, color: "#1B2C3A" }}>
-                                        {name}{isMe ? " (you)" : ""}
-                                      </h3>
-                                      <span style={{ fontSize: 12, color: "#8A8579" }}>
-                                        {(list.main || []).length} tasks · {(list.bonus || []).length} bonus
-                                      </span>
-                          </div></div>
-                  {(list.main || []).map((t, i) => <TaskCard key={t.id || i} t={t} isBonus={false} />)}
-                  {(list.bonus || []).length > 0 && (
-                            <div style={{ marginTop: 8 }}>
-                                          <div style={{ fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "#8A8579", marginBottom: 6 }}>
-                                                          Bonus — if you have time
-                                          </div>
-                              {(list.bonus || []).map((t, i) => <TaskCard key={t.id || i} t={t} isBonus={true} />)}
-                            </div></div>
-                          )}
-                </div>
-              );
+    const isMe = name === currentUser;
+    return (
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+          <div style={{ width: 32, height: 32, borderRadius: 16, background: isMe ? "#1B2C3A" : "#E5DFD3",
+                        color: isMe ? "#FAF7F2" : "#1B2C3A", display: "flex", alignItems: "center",
+                        justifyContent: "center", fontWeight: 700, fontSize: 14 }}>
+            {(name || "?")[0]}
+          </div>
+          <h3 style={{ margin: 0, fontFamily: "Georgia,serif", fontWeight: 500, fontSize: 17, color: "#1B2C3A" }}>
+            {name}{isMe ? " (you)" : ""}
+          </h3>
+          <span style={{ fontSize: 12, color: "#8A8579" }}>
+            {(list.main || []).length} tasks · {(list.bonus || []).length} bonus
+          </span>
+        </div>
+        {(list.main || []).map((t, i) => <TaskCard key={t.id || i} t={t} isBonus={false} />)}
+        {(list.bonus || []).length > 0 && (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "#8A8579", marginBottom: 6 }}>
+              Bonus — if you have time
+            </div>
+            {(list.bonus || []).map((t, i) => <TaskCard key={t.id || i} t={t} isBonus={true} />)}
+          </div>
+        )}
+      </div>
+    );
   }
 
   return (
-        <div style={{ maxWidth: 600, margin: "0 auto", padding: "16px 0" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-                          <div>
-                                    <h2 style={{ margin: 0, fontFamily: "Georgia,serif", fontWeight: 500, fontSize: 22, color: "#1B2C3A" }}>
-                                                Today's Ta
-                                    </h2>
-                            {digestDate && <div style={{ fontSize: 12, color: "#8A8579", marginTop: 2 }}>
-                              {isStale ? "⚠ From " + digestDate + " — regenerate?" : "Generated for " + digestDate}
-                            </div>}
-                          </div>
-                        <button onClick={onGenerate} disabled={digestLoad
-                                    style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px",
-                                                        background: "#1B2C3A", color: "#FAF7F2", border: "none", borderRadius: 6,
-                                                        fontSize: 13, fontWeight: 500, cursor: digestLoading ? "not-allowed" : "pointer", opacity: digestLoading ? 0.7 : 1 }}>
-                                  <ListChecks size={14} />
-                          {digestLoading ? "Generating…" : digest ? "Refresh" : "Generate"}
-                        </button>
-                </div>
-        
-          {digestError && (
-                  <div style={{ background: "#FFF0ED", border: "1px solid #F0C0B0", borderRadius: 6, padding: "10px 14px",
-                                         color: "#C9603C", fontSize: 13, marginBottom: 16 }}>
-                            ⚠ {digestError}
-                  </div>
-              )}
-        
-          {!digest && !digestLoading && !digestError && (
-                  <div style={{ textAlign: "center", padding: "40px 20px", color: "#8A8579" }}>
-                            <Sun size={40} style={{ opacity: 0.3, marginBottom: 12 }} />
-                            <div style={{ fontSize: 15, marginBottom: 8 }}>No digest yet for today</div>div>
-                            <div style={{ fontSize: 13 }}>Tap "Generate" to get your personalized 5-task list for today.</div>div>
-                  </div>div>
-              )}
-        
-          {digestLoading && (
-                  <div style={{ textAlign: "center", padding: "40px 20px", color: "#8A8579", fontSize: 14 }}>
-                            <RefreshCw size={24} style={{ animation: "spin 1s linear infinite", marginBottom: 12 }} />
-                            <div>AI is prioritizing your tasks…</div>
-                  </div></div>
-              )}
-        
-          {digest && !digestLoading && (
-                  <div>
-                    {assignees.map(name => (
-                                digest[name] ? (
-                                                <PersonSection key={name} name={name} list={digest[name]} />
-                                              ) : null
-                              ))}
-                  </div></div>
-              )}
-        </div></div>
-      );
+    <div style={{ maxWidth: 600, margin: "0 auto", padding: "16px 0" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <div>
+          <h2 style={{ margin: 0, fontFamily: "Georgia,serif", fontWeight: 500, fontSize: 22, color: "#1B2C3A" }}>
+            Today's Tasks
+          </h2>
+          {digestDate && <div style={{ fontSize: 12, color: "#8A8579", marginTop: 2 }}>
+            {isStale ? "⚠ From " + digestDate + " — regenerate?" : "Generated for " + digestDate}
+          </div>}
+        </div>
+        <button onClick={onGenerate} disabled={digestLoading}
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px",
+                         background: "#1B2C3A", color: "#FAF7F2", border: "none", borderRadius: 6,
+                         fontSize: 13, fontWeight: 500, cursor: digestLoading ? "not-allowed" : "pointer", opacity: digestLoading ? 0.7 : 1 }}>
+          <ListChecks size={14} />
+          {digestLoading ? "Generating…" : digest ? "Refresh" : "Generate"}
+        </button>
+      </div>
+
+      {digestError && (
+        <div style={{ background: "#FFF0EC", border: "1px solid #F0C4B8", borderRadius: 8, padding: "12px 14px",
+                      marginBottom: 16, fontSize: 13, color: "#C9603C" }}>
+          {digestError}
+        </div>
+      )}
+
+      {!digest && !digestLoading && (
+        <div style={{ textAlign: "center", padding: "48px 24px", color: "#8A8579" }}>
+          <ListChecks size={40} style={{ margin: "0 auto 12px", opacity: 0.4 }} />
+          <div style={{ fontFamily: "Georgia,serif", fontSize: 16, marginBottom: 8 }}>No digest yet</div>
+          <div style={{ fontSize: 13 }}>Generate today's prioritized task list for the family.</div>
+        </div>
+      )}
+
+      {digestLoading && (
+        <div style={{ textAlign: "center", padding: "48px 24px", color: "#8A8579" }}>
+          <div style={{ fontFamily: "Georgia,serif", fontSize: 16 }}>Generating your daily digest…</div>
+          <div style={{ fontSize: 13, marginTop: 8 }}>Claude is analyzing tasks and priorities.</div>
+        </div>
+      )}
+
+      {digest && !digestLoading && (
+        <div>
+          {assignees.map(name => (
+            digest[name] ? (
+              <PersonSection key={name} name={name} list={digest[name]} />
+            ) : null
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
