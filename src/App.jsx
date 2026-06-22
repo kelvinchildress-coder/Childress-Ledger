@@ -113,7 +113,17 @@ function isDueThisWeek(task) {
     if (!task.deadline) return true;
     return new Date(task.deadline) <= end;
   }
-  if (task.frequency === "daily" || task.frequency === "weekly") return true;
+  if (task.frequency === "daily") return true;
+  if (task.frequency === "weekly") {
+    if ((task.repeatDays || []).length > 0) {
+      const today = new Date();
+      const todayDay = today.getDay();
+      const hasCompletedToday = (task.completionHistory || []).includes(toISO(today));
+      if (hasCompletedToday) return false;
+      return task.repeatDays.includes(todayDay);
+    }
+    return true;
+  }
   if (!task.lastCompleted) return true;
   const last = new Date(task.lastCompleted);
   const nextDue = new Date(last.getTime() + freq.days * 86400000);
@@ -1223,6 +1233,11 @@ function TaskCard({ task, onToggle, onEdit, onSnooze, onDelete }) {
         <div style={styles.taskMeta}>
           <span style={styles.metaChip}><Users size={11} /> {task.assignedTo}</span>
           <span style={styles.metaChip}>{freq && freq.label}</span>
+          {(task.repeatDays || []).length > 0 && (
+            <span style={styles.metaChip}>
+              {task.repeatDays.map(d => ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][d]).join(", ")}
+            </span>
+          )}
           {task.deadline && (
             <span style={{ ...styles.metaChip,
               color: dDays !== null && dDays < 0 ? "#A04848" : (dDays !== null && dDays <= 2 ? "#C9603C" : "#8A8579"),
@@ -1523,7 +1538,8 @@ function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, al
   const [form, setForm] = useState(task ? { ...task, deadline: task.deadline ? task.deadline.slice(0, 10) : "" } : {
     title: "", details: "", category: "life-admin", assignedTo: "Anyone",
     frequency: "weekly", deadline: "", priority: "medium", notify: true,
-    repeat: task?.repeat || "none", estimatedCost: task?.estimatedCost || "", actualCost: task?.actualCost || "",
+    repeat: task?.repeat || "none", repeatDays: task?.repeatDays || [],
+    estimatedCost: task?.estimatedCost || "", actualCost: task?.actualCost || "",
     subtasks: task?.subtasks || [], notes: task?.notes || [],
   });
   const [parseBusy, setParseBusy] = useState(false);
@@ -1735,6 +1751,37 @@ function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, al
             <option value="yearly">Yearly</option>
           </select>
         </Field>
+        {(form.frequency === "weekly" || form.repeat === "weekly") && (
+          <Field label="Repeat on days" full>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 2 }}>
+              {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map((day, i) => {
+                const active = (form.repeatDays || []).includes(i);
+                return (
+                  <button key={i} type="button"
+                    onClick={() => {
+                      const cur = form.repeatDays || [];
+                      update("repeatDays", active ? cur.filter(d => d !== i) : [...cur, i].sort((a,b) => a-b));
+                    }}
+                    style={{
+                      padding: "6px 12px", borderRadius: 20, border: "1.5px solid",
+                      borderColor: active ? "#1B2C3A" : "#D0CBB8",
+                      background: active ? "#1B2C3A" : "transparent",
+                      color: active ? "#FAF7F2" : "#6B6B6B",
+                      fontSize: 13, fontWeight: 500, cursor: "pointer",
+                      minWidth: 44, minHeight: 36, touchAction: "manipulation",
+                    }}>
+                    {day}
+                  </button>
+                );
+              })}
+            </div>
+            {(form.repeatDays || []).length === 0 && (
+              <div style={{ fontSize: 12, color: "#8A8579", marginTop: 4 }}>
+                No specific days — task is eligible any day of the week.
+              </div>
+            )}
+          </Field>
+        )}
         <Field label="Budget (optional)">
           <input type="text" value={form.estimatedCost || ""} onChange={(e) => update("estimatedCost", e.target.value)} placeholder="Estimated cost e.g. £300" style={styles.input} />
         </Field>
