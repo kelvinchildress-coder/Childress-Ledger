@@ -2843,7 +2843,7 @@ const styles = {
   taskGrid: { display: "flex", flexDirection: "column", gap: 8 },
   taskCard: { display: "flex", alignItems: "flex-start", gap: 14, padding: "16px 18px", backgroundColor: "#FFFFFF", border: "1px solid #E5DFD3", borderLeftStyle: "solid", borderRadius: 4, transition: "all 0.15s", position: "relative" },
   taskCardDone: { backgroundColor: "#F2EDE4", opacity: 0.75 },
-  checkbox: { width: 22, height: 22, border: "1.5px solid", borderRadius: 4, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 2, transition: "all 0.15s", padding: 0, background: "transparent" },
+  checkbox: { width: 24, height: 24, border: "1.5px solid", borderRadius: 4, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, margin: "-10px -2px -10px -10px", transition: "all 0.15s", padding: "10px", background: "transparent", touchAction: "manipulation" },
   taskTitleRow: { display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" },
   taskTitle: { fontSize: 15, fontWeight: 500, margin: 0, lineHeight: 1.3 },
   priorityHigh: { fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase", color: "#C9603C", fontWeight: 600, backgroundColor: "#FAEFEA", padding: "2px 8px", borderRadius: 2 },
@@ -2853,7 +2853,7 @@ const styles = {
   streakBadge: { display: "inline-flex", alignItems: "center", gap: 3, padding: "2px 8px", backgroundColor: "#FAEFEA", color: "#C9603C", borderRadius: 999, fontSize: 11, fontWeight: 600, fontVariantNumeric: "tabular-nums" },
   primaryBtn: { display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 18px", backgroundColor: "#1B2C3A", color: "#FAF7F2", border: "none", borderRadius: 3, fontSize: 14, fontWeight: 500, transition: "background 0.15s", textDecoration: "none" },
   ghostBtn: { display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 16px", backgroundColor: "transparent", color: "#1B2C3A", border: "1px solid #C9C2B5", borderRadius: 3, fontSize: 13, fontWeight: 500, textDecoration: "none" },
-  iconBtn: { width: 30, height: 30, border: "none", backgroundColor: "transparent", color: "#6B6B6B", borderRadius: 3, display: "flex", alignItems: "center", justifyContent: "center", transition: "background 0.15s", padding: 0 },
+  iconBtn: { width: 44, height: 44, border: "none", backgroundColor: "transparent", color: "#6B6B6B", borderRadius: 3, display: "flex", alignItems: "center", justifyContent: "center", transition: "background 0.15s", padding: 0, touchAction: "manipulation" },
   linkBtn: { background: "transparent", border: "none", color: "#C9603C", fontWeight: 500, cursor: "pointer", padding: "4px 8px", fontSize: 13, textDecoration: "underline" },
   snoozeMenu: { position: "absolute", top: 36, right: 0, backgroundColor: "#FFFFFF", border: "1px solid #E5DFD3", borderRadius: 4, boxShadow: "0 4px 16px rgba(27,44,58,0.08)", padding: 8, minWidth: 200, zIndex: 10 },
   snoozeTitle: { fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "#8A8579", fontWeight: 600, padding: "4px 8px 8px" },
@@ -2958,9 +2958,9 @@ function TodayView({ digest, digestLoading, digestError, digestDate, onGenerate,
           </div>
           {fullTask && (
             <button onClick={() => onToggle(fullTask.id)}
-                    style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 14, border: "2px solid",
+                    style={{ flexShrink: 0, width: 44, height: 44, borderRadius: 22, border: "2px solid",
                              borderColor: isDone ? "#5C7A3F" : "#D0CBB8", background: isDone ? "#5C7A3F" : "transparent",
-                             cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, color: isDone ? "#fff" : "transparent" }}>
+                             cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, color: isDone ? "#fff" : "transparent", touchAction: "manipulation" }}>
               {isDone ? "✓" : ""}
             </button>
           )}
