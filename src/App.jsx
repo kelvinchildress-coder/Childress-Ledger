@@ -38,7 +38,7 @@ import {
   Settings as SettingsIcon, Cloud, CloudOff, Bell, BellOff,
   Wand2, TrendingUp, TrendingDown, Trophy, RefreshCw, ChevronDown,
   Brain, Lightbulb, ArrowRight, MessageCircle, Send,
-  Gift, Camera, MapPin, Sun, ListChecks,
+  Gift, Camera, MapPin, Sun, ListChecks, Lock, Eye, EyeOff,
 } from "lucide-react";
 
 /* CONSTANTS */
@@ -57,14 +57,23 @@ const CATEGORIES = [
   { id: "family",       label: "Family",          icon: Users,         color: "#B5832E" },
   { id: "other",        label: "Other",           icon: Sparkles,      color: "#6B6B6B" },
 ];
-const FREQUENCIES = [
-  { id: "daily",     label: "Daily",         days: 1   },
-  { id: "weekly",    label: "Weekly",        days: 7   },
-  { id: "biweekly",  label: "Every 2 weeks", days: 14  },
-  { id: "monthly",   label: "Monthly",       days: 30  },
-  { id: "quarterly", label: "Quarterly",     days: 91  },
-  { id: "annual",    label: "Annual",        days: 365 },
-  { id: "once",      label: "One time",      days: null },
+const TASK_FREQUENCIES = [
+  { id: "once",       label: "Once (in window)",    days: null },
+  { id: "daily",      label: "Daily",               days: 1   },
+  { id: "weekly",     label: "Weekly",              days: 7   },
+  { id: "biweekly",   label: "Every 2 weeks",       days: 14  },
+  { id: "monthly",    label: "Monthly",             days: 30  },
+  { id: "as-needed",  label: "As needed",           days: null },
+];
+const FREQUENCIES = TASK_FREQUENCIES;
+const REPEAT_CYCLES = [
+  { id: "none",          label: "No repeat (one-time)"   },
+  { id: "weekly",        label: "Repeats weekly"          },
+  { id: "monthly",       label: "Repeats monthly"         },
+  { id: "quarterly",     label: "Repeats quarterly"       },
+  { id: "semi-annually", label: "Repeats every 6 months"  },
+  { id: "annually",      label: "Repeats annually"        },
+  { id: "indefinitely",  label: "Repeats indefinitely"    },
 ];
 const PRIORITIES = [
   { id: "high",   label: "High",   order: 0, color: "#C9603C" },
@@ -105,29 +114,52 @@ function isSnoozed(task) {
   if (!task.snoozedUntil) return false;
   return startOfDay(task.snoozedUntil) > startOfDay(new Date());
 }
+function isInAvailabilityWindow(task) {
+  if (!task.availableFrom && !task.availableTo) return true;
+  const today = new Date();
+  const mm = String(today.getMonth()+1).padStart(2,'0');
+  const dd = String(today.getDate()).padStart(2,'0');
+  const todayMMDD = mm + '-' + dd;
+  const from = task.availableFrom || null;
+  const to   = task.availableTo   || null;
+  if (from && to && from > to) return todayMMDD >= from || todayMMDD <= to;
+  if (from && todayMMDD < from) return false;
+  if (to   && todayMMDD > to)   return false;
+  return true;
+}
+function isVisibleToUser(task, identity) {
+  if (!identity) return true;
+  const name = identity.name;
+  const visibleTo  = Array.isArray(task.visibleTo)  ? task.visibleTo  : [];
+  const hiddenFrom = Array.isArray(task.hiddenFrom) ? task.hiddenFrom : [];
+  if (hiddenFrom.includes(name)) return false;
+  if (visibleTo.length > 0 && !visibleTo.includes(name)) return false;
+  return true;
+}
 function isDueThisWeek(task) {
   if (isSnoozed(task)) return false;
-  const { end } = getWeekRange();
-  const freq = FREQUENCIES.find(f => f.id === task.frequency);
-  if (task.frequency === "once") {
+  if (!isInAvailabilityWindow(task)) return false;
+  const freq = task.taskFrequency || task.frequency;
+  const today = toISO(new Date());
+  const todayDay = new Date().getDay();
+  if (freq === 'once' || freq === 'as-needed') {
     if (!task.deadline) return true;
-    return new Date(task.deadline) <= end;
+    const d = daysUntil(task.deadline);
+    return d !== null && d <= 7 && d >= -1;
   }
-  if (task.frequency === "daily") return true;
-  if (task.frequency === "weekly") {
+  if (freq === 'daily') { return !(task.completionHistory || []).includes(today); }
+  if (freq === 'weekly' || freq === 'biweekly') {
     if ((task.repeatDays || []).length > 0) {
-      const today = new Date();
-      const todayDay = today.getDay();
-      const hasCompletedToday = (task.completionHistory || []).includes(toISO(today));
+      const hasCompletedToday = (task.completionHistory || []).includes(today);
       if (hasCompletedToday) return false;
       return task.repeatDays.includes(todayDay);
     }
     return true;
   }
   if (!task.lastCompleted) return true;
-  const last = new Date(task.lastCompleted);
-  const nextDue = new Date(last.getTime() + freq.days * 86400000);
-  return nextDue <= end;
+  const freqDays = (TASK_FREQUENCIES.find(f => f.id === freq) || {}).days;
+  if (!freqDays) return true;
+  return Math.round((Date.now() - new Date(task.lastCompleted)) / 86400000) >= freqDays * 0.85;
 }
 function calcStreak(task) {
   if (task.frequency === "once") return 0;
@@ -236,6 +268,8 @@ const DEFAULT_SETTINGS = {
   vapidPublicKey: "",
   pushEnabled: false,
   dailyDigestEnabled: false,
+  dailyTaskLimit: 5,
+  digestTimes: {},
 };
 function migrate(arr) {
   return (arr || []).map(t => {
@@ -243,11 +277,19 @@ function migrate(arr) {
       snoozedUntil: null, completionHistory: [], completionLog: [],
       lastModified: t.lastModified || Date.now(),
       createdAt: t.createdAt || Date.now(),
+      visibleTo: [], hiddenFrom: [],
+      availableFrom: null, availableTo: null,
+      taskFrequency: t.taskFrequency || t.frequency || 'weekly',
+      repeatCycle: t.repeatCycle || (t.repeat && t.repeat !== 'none' ? t.repeat : 'indefinitely'),
       ...t,
     };
-    if ((!next.completionLog || next.completionLog.length === 0) && (next.completionHistory || []).length > 0) {
-      next.completionLog = next.completionHistory.map(d => ({ date: d, by: "Family" }));
-    }
+    if (next.taskFrequency === 'annually') next.taskFrequency = 'annual';
+    if (next.frequency === 'annually') next.frequency = 'annual';
+    if (!Array.isArray(next.visibleTo))  next.visibleTo  = [];
+    if (!Array.isArray(next.hiddenFrom)) next.hiddenFrom = [];
+    return next;
+  });
+}
     return next;
   });
 }
@@ -275,9 +317,9 @@ function SearchPalette({ tasks, onClose, onEditTask, setView }) {
   const urgency = (t) => {
     if (!t.deadline) return "";
     const days = Math.ceil((new Date(t.deadline) - new Date()) / 86400000);
-    if (days <= 3) return "🔴";
-    if (days <= 7) return "🟡";
-    return "🟢";
+    if (days <= 3) return "ð´";
+    if (days <= 7) return "ð¡";
+    return "ð¢";
   };
   const overlayStyle = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 9999, display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 80 };
   const paletteStyle = { background: "#fff", borderRadius: 12, width: "min(560px, 92vw)", boxShadow: "0 20px 60px rgba(0,0,0,0.25)", overflow: "hidden" };
@@ -285,7 +327,7 @@ function SearchPalette({ tasks, onClose, onEditTask, setView }) {
   return (
     <div style={overlayStyle} onClick={onClose}>
       <div style={paletteStyle} onClick={e => e.stopPropagation()}>
-        <input ref={inputRef} value={q} onChange={e => setQ(e.target.value)} placeholder="Search tasks… (Esc to close)" style={inputStyle} />
+        <input ref={inputRef} value={q} onChange={e => setQ(e.target.value)} placeholder="Search tasksâ¦ (Esc to close)" style={inputStyle} />
         {results.length === 0 && <div style={{ padding: "16px 20px", color: "#888", fontSize: 14 }}>No tasks found</div>}
         {results.map((t, i) => (
           <div key={t.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"11px 20px", cursor:"pointer", background:"#fff", borderBottom:"1px solid #f0f0f0" }} onClick={() => { onEditTask(t); setView("add"); onClose(); }}
@@ -294,10 +336,10 @@ function SearchPalette({ tasks, onClose, onEditTask, setView }) {
           >
             <span style={{ flex: 1, fontWeight: 500, fontSize: 15 }}>{urgency(t)} {t.title}</span>
             <span style={{ fontSize: 12, color: "#888", textTransform: "capitalize" }}>{t.category?.replace(/-/g," ")}</span>
-            {t.completed && <span style={{ fontSize: 11, color: "#4CAF50" }}>✓ done</span>}
+            {t.completed && <span style={{ fontSize: 11, color: "#4CAF50" }}>â done</span>}
           </div>
         ))}
-        <div style={{ padding: "8px 20px", color: "#aaa", fontSize: 11, borderTop: "1px solid #f0f0f0" }}>Ctrl+K to open · Click to jump · Esc to close</div>
+        <div style={{ padding: "8px 20px", color: "#aaa", fontSize: 11, borderTop: "1px solid #f0f0f0" }}>Ctrl+K to open Â· Click to jump Â· Esc to close</div>
       </div>
     </div>
   );
@@ -344,13 +386,13 @@ function CalendarView({ tasks, onEditTask, setView }) {
                 style={{ fontSize:10, padding:"1px 4px", borderRadius:3, marginBottom:1, cursor:"pointer", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
                   background: t.completed ? "#e8f5e9" : "#FFF0E8", color: t.completed ? "#388E3C" : "#C96038", fontWeight:500 }}
                 title={t.title}>
-                {t.completed?"✓ ":""}{t.title}
+                {t.completed?"â ":""}{t.title}
               </div>
             ))}
           </div>
         ))}
       </div>
-      <p style={{ color:"#888", fontSize:12, marginTop:12, textAlign:"center" }}>Click any task to edit · Showing {Object.values(tasksByDay).flat().length} task(s) with deadlines this month</p>
+      <p style={{ color:"#888", fontSize:12, marginTop:12, textAlign:"center" }}>Click any task to edit Â· Showing {Object.values(tasksByDay).flat().length} task(s) with deadlines this month</p>
     </div>
   );
 }
@@ -522,12 +564,12 @@ export default function FamilyLedger() {
 
   
 
-  // ── Reminders state ──────────────────────────────────────────────
+  // ââ Reminders state ââââââââââââââââââââââââââââââââââââââââââââââ
   const [remindersList, setRemindersList] = useState(() => loadRemindersLocal());
   const [remindersLoading, setRemindersLoading] = useState(false);
   const [dueReminderTasks, setDueReminderTasks] = useState([]);
 
-    // — Today's Tasks (daily digest) state ——————————————————
+    // â Today's Tasks (daily digest) state ââââââââââââââââââ
     const [todayDigest, setTodayDigest] = useState(null);
     const [digestLoading, setDigestLoading] = useState(false);
     const [digestError, setDigestError] = useState(null);
@@ -677,30 +719,35 @@ export default function FamilyLedger() {
 
   function toggleComplete(taskId) {
     const today = toISO(new Date());
-    const by = (identity && identity.name) || "Family";
+    const by = identity ? identity.name : "Unknown";
     const next = tasks.map(t => {
       if (t.id !== taskId) return t;
-      const history = t.completionHistory || [];
-      const log = t.completionLog || [];
-      const wasDoneToday = history.includes(today);
+      const wasDoneToday = (t.completionHistory || []).includes(today);
       if (wasDoneToday) {
-        const filtered = history.filter(d => d !== today);
-        const filteredLog = log.filter(e => e.date !== today);
+        const filtered = (t.completionHistory || []).filter(d => d !== today);
+        const filteredLog = (t.completionLog || []).filter(e => !(e.date === today && e.by === by));
         return { ...t, completionHistory: filtered, completionLog: filteredLog,
           lastCompleted: filtered.sort().pop() || null, lastModified: Date.now() };
       }
-      const newHistory = [...history, today].sort();
-      const newLog = [...log, { date: today, by }];
-      const oldStreak = calcStreak(t);
+      const newHistory = [...(t.completionHistory || []), today];
+      const newLog = [...(t.completionLog || []), { date: today, by }];
       const newStreak = calcStreak({ ...t, completionHistory: newHistory });
-      if (newStreak > oldStreak && newStreak >= 2) {
-        triggerCelebration(t.title, newStreak, identity);
-      }
+      if (newStreak >= 3) triggerCelebration(t.title, newStreak, identity);
       appendEvent({ kind: "complete", taskId: t.id, meta: { by } }).then(loadEventLog).then(setEvents);
       return { ...t, completionHistory: newHistory, completionLog: newLog,
         lastCompleted: today, lastModified: Date.now() };
     });
     persist(next);
+    if (effectiveBackendUrl) {
+      setTimeout(async () => {
+        const r = await loadFromBackend(effectiveBackendUrl, effectiveSharedSecret);
+        if (r.ok && r.data && r.data.tasks) {
+          const fresh = migrate(r.data.tasks);
+          setTasks(fresh);
+          await persistLocal(fresh);
+        }
+      }, 2000);
+    }
   }
 
   function snoozeTask(taskId, dateISO) {
@@ -730,7 +777,25 @@ export default function FamilyLedger() {
     persist(stamped);
   }
 
-  const thisWeekTasks = useMemo(() => tasks.filter(isDueThisWeek), [tasks]);
+  const thisWeekTasks = useMemo(() => tasks
+    .filter(isDueThisWeek)
+    .filter(t => isVisibleToUser(t, identity)),
+  [tasks, identity]);
+  const dailyLimit = settings.dailyTaskLimit || 5;
+  const weeklyLimit = dailyLimit * 7;
+  const todayISO = toISO(new Date());
+  const outstandingTasks = useMemo(() => tasks.filter(t => {
+    if (isSnoozed(t)) return false;
+    if (!isVisibleToUser(t, identity)) return false;
+    return !isDueThisWeek(t);
+  }), [tasks, identity]);
+  const cappedThisWeek = useMemo(() => {
+    const done = thisWeekTasks.filter(t => (t.completionHistory || []).includes(todayISO));
+    const pending = thisWeekTasks.filter(t => !(t.completionHistory || []).includes(todayISO));
+    const shown = pending.slice(0, weeklyLimit);
+    const overflow = pending.slice(weeklyLimit);
+    return { shown: [...done, ...shown], overflow, overflowCount: overflow.length };
+  }, [thisWeekTasks, weeklyLimit, todayISO]);
   const completedCount = thisWeekTasks.filter(t => {
     const { start, end } = getWeekRange();
     return (t.completionHistory || []).some(d => { const dd = new Date(d); return dd >= start && dd <= end; });
@@ -819,10 +884,11 @@ export default function FamilyLedger() {
 
         {view === "dashboard" && (
           <Dashboard
-            tasks={thisWeekTasks} allTasks={tasks}
+            tasks={cappedThisWeek.shown} allTasks={tasks}
+            outstandingTasks={[...outstandingTasks, ...cappedThisWeek.overflow]}
             onToggle={toggleComplete}
-            onEdit={(t) => { setEditingTask(t); setView("add"); }}
-            onAdd={() => { setEditingTask(null); setView("add"); }}
+            onEdit={t => setEditingTask(t)}
+            onAdd={() => { setEditingTask(null); setView('form'); }}
             onQuickAdd={upsertTask}
             onSnooze={snoozeTask}
             onDelete={deleteTask}
@@ -830,7 +896,7 @@ export default function FamilyLedger() {
             groupBy={groupBy} setGroupBy={setGroupBy}
             assigneeOptions={assigneeOptions}
             events={events} identity={identity} aiCfg={aiCfg}
-            categories={CATEGORIES} frequencies={FREQUENCIES}
+            categories={CATEGORIES} frequencies={TASK_FREQUENCIES}
           />
         )}
         {view === "all" && (
@@ -988,9 +1054,9 @@ function Header({ view, setView, weekRange, completedCount, totalCount, syncStat
       <div style={styles.headerTop}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={styles.eyebrow}>
-            The Family Ledger · Week of {weekLabel}
+            The Family Ledger Â· Week of {weekLabel}
             {backendConfigured && <SyncBadge status={syncStatus} error={syncError} backendUrl={backendUrl} />}
-              {onSearch && <button onClick={onSearch} title="Search tasks (Ctrl+K)" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0 6px', opacity: 0.6, fontSize: 16 }}>🔍</button>}
+              {onSearch && <button onClick={onSearch} title="Search tasks (Ctrl+K)" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0 6px', opacity: 0.6, fontSize: 16 }}>ð</button>}
           </div>
           <h1 style={styles.title}>
             <span style={{ fontStyle: "italic", color: "#C9603C" }}>House</span> business.
@@ -1034,7 +1100,7 @@ function SyncBadge({ status, error, backendUrl }) {
     idle:    { Icon: Cloud,    color: "#8A8579", text: "ready" },
   };
   const { Icon, color, text } = map[status] || map.idle;
-  const errorMsg = error ? error.message + (error.hint ? " · " + error.hint : "") : "";
+  const errorMsg = error ? error.message + (error.hint ? " Â· " + error.hint : "") : "";
   return (
     <span style={{ position: "relative", display: "inline-flex" }}>
       <span onClick={() => error && setOpen(o => !o)}
@@ -1075,73 +1141,142 @@ function SyncErrorBanner({ error, backendUrl, onRetry }) {
 }
 
 /* DASHBOARD */
-function Dashboard({ tasks, allTasks, onToggle, onEdit, onAdd, onQuickAdd, onSnooze, onDelete, onExportICS, groupBy, setGroupBy, assigneeOptions, events, identity, aiCfg, categories, frequencies }) {
-  const grouped = useMemo(() => {
-    const g = {};
-    if (groupBy === "category") tasks.forEach(t => { (g[t.category] ||= []).push(t); });
-    else tasks.forEach(t => { (g[t.priority] ||= []).push(t); });
-    return g;
-  }, [tasks, groupBy]);
-  const groupOrder = groupBy === "category" ? CATEGORIES.map(c => c.id) : PRIORITIES.map(p => p.id);
-  const getMeta = (key) => groupBy === "category" ? CATEGORIES.find(c => c.id === key) : PRIORITIES.find(p => p.id === key);
+/* QUICK EDIT PANEL */
+function QuickEditPanel({ task, onSave, onClose, assigneeOptions }) {
+  const [form, setForm] = React.useState({
+    title: task.title || "",
+    assignedTo: task.assignedTo || "Anyone",
+    priority: task.priority || "medium",
+    deadline: task.deadline ? task.deadline.slice(0,10) : "",
+    details: task.details || "",
+    taskFrequency: task.taskFrequency || task.frequency || "weekly",
+    repeatCycle: task.repeatCycle || "indefinitely",
+    availableFrom: task.availableFrom || "",
+    availableTo: task.availableTo || "",
+  });
+  const upd = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const submit = () => {
+    if (!form.title.trim()) return;
+    onSave({ ...task, ...form, deadline: form.deadline || null, lastModified: Date.now() });
+  };
+  return (
+    <div style={{ position:"fixed", inset:0, zIndex:999, background:"rgba(0,0,0,0.35)", display:"flex", justifyContent:"flex-end" }} onClick={onClose}>
+      <div style={{ width:"min(420px,100vw)", background:"#FAF7F2", height:"100vh", overflowY:"auto", padding:24, boxShadow:"-4px 0 24px rgba(0,0,0,0.15)", display:"flex", flexDirection:"column", gap:16 }} onClick={e => e.stopPropagation()}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          <h3 style={{ fontFamily:"'Fraunces', serif", fontSize:20, margin:0 }}>Quick Edit</h3>
+          <button onClick={onClose} style={styles.iconBtn}><X size={18} /></button>
+        </div>
+        <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+          <div><label style={styles.label}>Title</label><input value={form.title} onChange={e => upd("title", e.target.value)} style={styles.input} autoFocus /></div>
+          <div><label style={styles.label}>Assigned to</label><select value={form.assignedTo} onChange={e => upd("assignedTo", e.target.value)} style={styles.input}>{assigneeOptions.map(a => <option key={a} value={a}>{a}</option>)}</select></div>
+          <div><label style={styles.label}>Priority</label><select value={form.priority} onChange={e => upd("priority", e.target.value)} style={styles.input}>{PRIORITIES.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}</select></div>
+          <div><label style={styles.label}>Task frequency</label><select value={form.taskFrequency} onChange={e => upd("taskFrequency", e.target.value)} style={styles.input}>{TASK_FREQUENCIES.map(f => <option key={f.id} value={f.id}>{f.label}</option>)}</select></div>
+          <div><label style={styles.label}>Repeat cycle</label><select value={form.repeatCycle} onChange={e => upd("repeatCycle", e.target.value)} style={styles.input}>{REPEAT_CYCLES.map(r => <option key={r.id} value={r.id}>{r.label}</option>)}</select></div>
+          <div style={{ display:"flex", gap:8 }}>
+            <div style={{ flex:1 }}><label style={styles.label}>Available from (MM-DD)</label><input value={form.availableFrom} onChange={e => upd("availableFrom", e.target.value)} placeholder="03-15" style={styles.input} /></div>
+            <div style={{ flex:1 }}><label style={styles.label}>Available to (MM-DD)</label><input value={form.availableTo} onChange={e => upd("availableTo", e.target.value)} placeholder="10-31" style={styles.input} /></div>
+          </div>
+          <div><label style={styles.label}>Deadline</label><input type="date" value={form.deadline} onChange={e => upd("deadline", e.target.value)} style={styles.input} /></div>
+          <div><label style={styles.label}>Notes</label><textarea value={form.details} onChange={e => upd("details", e.target.value)} rows={3} style={{ ...styles.input, resize:"vertical" }} /></div>
+        </div>
+        <div style={{ display:"flex", gap:8, marginTop:8 }}>
+          <button onClick={onClose} style={styles.ghostBtn}>Cancel</button>
+          <button onClick={submit} style={styles.primaryBtn}><Check size={14} /> Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
-  if (tasks.length === 0) {
+function Dashboard({ tasks, allTasks, outstandingTasks, onToggle, onEdit, onAdd, onQuickAdd, onSnooze, onDelete, onExportICS, groupBy, setGroupBy, assigneeOptions, events, identity, aiCfg, categories, frequencies }) {
+  const [showOutstanding, setShowOutstanding] = React.useState(false);
+  const [sortBy, setSortBy] = React.useState("category");
+  const [quickEditTask, setQuickEditTask] = React.useState(null);
+  const displayTasks = showOutstanding ? (outstandingTasks || []) : (tasks || []);
+  const outstanding = outstandingTasks || [];
+  const grouped = useMemo(() => {
+    let sorted = [...displayTasks];
+    if (sortBy === "deadline") {
+      sorted.sort((a, b) => {
+        if (!a.deadline && !b.deadline) return 0;
+        if (!a.deadline) return 1;
+        if (!b.deadline) return -1;
+        return a.deadline < b.deadline ? -1 : 1;
+      });
+      return [{ key: "deadline", items: sorted }];
+    }
+    const g = {};
+    sorted.forEach(t => {
+      const key = sortBy === "priority" ? (t.priority || "medium") : (t.category || "other");
+      if (!g[key]) g[key] = [];
+      g[key].push(t);
+    });
+    return Object.keys(g).map(k => ({ key: k, items: g[k] }));
+  }, [displayTasks, sortBy]);
+  const groupOrder = grouped.map(g => g.key);
+  if (tasks.length === 0 && !showOutstanding) {
     return (
       <>
         <QuickAdd onAdd={onQuickAdd} assigneeOptions={assigneeOptions} events={events} aiCfg={aiCfg} categories={categories} frequencies={frequencies} />
         <div style={styles.emptyState}>
-          <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: 28, margin: "0 0 8px" }}>A clean slate this week.</h2>
-          <p style={{ color: "#6B6B6B", margin: "0 0 24px" }}>Nothing due. Quick-add a task above, or open the full form.</p>
+          <h2 style={{ fontFamily:"'Fraunces', serif", fontSize:28, margin:"0 0 8px" }}>A clean slate this week.</h2>
+          <p style={{ color:"#6B6B6B", margin:"0 0 24px" }}>Nothing due. Quick-add a task above, or open the full form.</p>
           <button style={styles.primaryBtn} onClick={onAdd}><Plus size={16} /> Add a task</button>
+          {outstanding.length > 0 && <button style={{ ...styles.ghostBtn, marginTop:12 }} onClick={() => setShowOutstanding(true)}>View {outstanding.length} outstanding tasks</button>}
         </div>
+        {quickEditTask && <QuickEditPanel task={quickEditTask} onSave={(u) => { onEdit(u); setQuickEditTask(null); }} onClose={() => setQuickEditTask(null)} assigneeOptions={assigneeOptions} />}
       </>
     );
   }
-
   return (
     <div>
       <QuickAdd onAdd={onQuickAdd} assigneeOptions={assigneeOptions} events={events} aiCfg={aiCfg} categories={categories} frequencies={frequencies} />
       <LeaderboardStrip allTasks={allTasks} identity={identity} />
       <div style={styles.sectionHeader}>
-        <h2 style={styles.sectionTitle}>This week's plays</h2>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ display:"flex", gap:0, borderRadius:6, overflow:"hidden", border:"1.5px solid #D0CBB8" }}>
+          <button onClick={() => setShowOutstanding(false)} style={{ ...styles.toggleBtn, borderRadius:0, borderRight:"1px solid #D0CBB8", ...(!showOutstanding ? styles.toggleBtnActive : {}) }}>This Week ({tasks.length})</button>
+          <button onClick={() => setShowOutstanding(true)} style={{ ...styles.toggleBtn, borderRadius:0, ...(showOutstanding ? styles.toggleBtnActive : {}) }}>Outstanding {outstanding.length > 0 ? `(${outstanding.length})` : ""}</button>
+        </div>
+        <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
           <div style={styles.toggleGroup}>
-            <button onClick={() => setGroupBy("category")}
-              style={{ ...styles.toggleBtn, ...(groupBy === "category" ? styles.toggleBtnActive : {}) }}>By category</button>
-            <button onClick={() => setGroupBy("priority")}
-              style={{ ...styles.toggleBtn, ...(groupBy === "priority" ? styles.toggleBtnActive : {}) }}>By priority</button>
+            <button onClick={() => setSortBy("category")} style={{ ...styles.toggleBtn, ...(sortBy==="category" ? styles.toggleBtnActive : {}) }}>By category</button>
+            <button onClick={() => setSortBy("priority")} style={{ ...styles.toggleBtn, ...(sortBy==="priority" ? styles.toggleBtnActive : {}) }}>By priority</button>
+            <button onClick={() => setSortBy("deadline")} style={{ ...styles.toggleBtn, ...(sortBy==="deadline" ? styles.toggleBtnActive : {}) }}>By deadline</button>
           </div>
           <button style={styles.ghostBtn} onClick={onExportICS}><CalendarDays size={14} /> Export</button>
           <button style={styles.primaryBtn} onClick={onAdd}><Plus size={16} /> Add</button>
         </div>
       </div>
-      {groupOrder.map(key => {
-        const items = grouped[key];
-        if (!items || items.length === 0) return null;
-        const meta = getMeta(key);
-        const doneCount = items.filter(t => {
-          const { start, end } = getWeekRange();
-          return (t.completionHistory || []).some(d => new Date(d) >= start && new Date(d) <= end);
-        }).length;
-        return (
-          <section key={key} style={styles.categorySection}>
-            <div style={styles.categoryHeader}>
-              <div style={{ ...styles.categoryDot, backgroundColor: meta.color }} />
-              <h3 style={styles.categoryTitle}>{meta.label}{groupBy === "priority" ? " priority" : ""}</h3>
-              <div style={styles.categoryCount}>{doneCount} / {items.length}</div>
-            </div>
-            <div style={styles.taskGrid}>
-              {items.map(t => (
-                <TaskCard key={t.id} task={t}
-                  onToggle={() => onToggle(t.id)}
-                  onEdit={() => onEdit(t)}
-                  onSnooze={(d) => onSnooze(t.id, d)}
-                  onDelete={onDelete ? () => onDelete(t.id) : undefined} />
-              ))}
-            </div>
-          </section>
-        );
-      })}
+      {sortBy === "deadline" ? (
+        <div style={styles.taskGrid}>
+          {(grouped[0]?.items || []).map(t => (
+            <TaskCard key={t.id} task={t} onToggle={() => onToggle(t.id)} onEdit={() => onEdit(t)} onQuickEdit={() => setQuickEditTask(t)} onSnooze={d => onSnooze(t.id, d)} onDelete={onDelete ? () => onDelete(t.id) : undefined} />
+          ))}
+        </div>
+      ) : (
+        groupOrder.map(key => {
+          const items = (grouped.find(g => g.key === key) || {}).items || [];
+          const meta = sortBy === "priority"
+            ? (PRIORITIES.find(p => p.id === key) || { label: key, color: "#8A8579" })
+            : (CATEGORIES.find(c => c.id === key) || { label: key.replace(/-/g," "), color: "#6B6B6B", icon: Sparkles });
+          const doneCount = items.filter(t => (t.completionHistory || []).includes(toISO(new Date()))).length;
+          return (
+            <section key={key} style={styles.categorySection}>
+              <div style={styles.categoryHeader}>
+                <div style={{ ...styles.categoryDot, backgroundColor: meta.color }} />
+                <h3 style={styles.categoryTitle}>{meta.label}{sortBy==="priority" ? " priority" : ""}</h3>
+                <div style={styles.categoryCount}>{doneCount} / {items.length}</div>
+              </div>
+              <div style={styles.taskGrid}>
+                {items.map(t => (
+                  <TaskCard key={t.id} task={t} onToggle={() => onToggle(t.id)} onEdit={() => onEdit(t)} onQuickEdit={() => setQuickEditTask(t)} onSnooze={d => onSnooze(t.id, d)} onDelete={onDelete ? () => onDelete(t.id) : undefined} />
+                ))}
+              </div>
+            </section>
+          );
+        })
+      )}
+      {quickEditTask && <QuickEditPanel task={quickEditTask} onSave={(u) => { onEdit(u); setQuickEditTask(null); }} onClose={() => setQuickEditTask(null)} assigneeOptions={assigneeOptions} />}
     </div>
   );
 }
@@ -1190,7 +1325,7 @@ function renderDetails(text) {
   });
 }
 
-function TaskCard({ task, onToggle, onEdit, onSnooze, onDelete }) {
+function TaskCard({ task, onToggle, onEdit, onQuickEdit, onSnooze, onDelete }) {
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const cat = CATEGORIES.find(c => c.id === task.category) || CATEGORIES[CATEGORIES.length - 1];
@@ -1244,12 +1379,12 @@ function TaskCard({ task, onToggle, onEdit, onSnooze, onDelete }) {
               fontWeight: dDays !== null && dDays <= 2 ? 600 : 400,
             }}>
               <Calendar size={11} /> {formatDate(task.deadline)}
-              {dDays !== null && dDays <= 7 && dDays >= 0 && " · " + dDays + "d"}
-              {dDays !== null && dDays < 0 && " · overdue"}
+              {dDays !== null && dDays <= 7 && dDays >= 0 && " Â· " + dDays + "d"}
+              {dDays !== null && dDays < 0 && " Â· overdue"}
             </span>
           )}
           <span style={{ ...styles.metaChip, color: priorityMeta && priorityMeta.color }}>
-            • {priorityMeta && priorityMeta.label.toLowerCase()}
+            â¢ {priorityMeta && priorityMeta.label.toLowerCase()}
           </span>
         </div>
       {task.subtasks && task.subtasks.length > 0 && (() => {
@@ -1282,6 +1417,7 @@ function TaskCard({ task, onToggle, onEdit, onSnooze, onDelete }) {
       </div>
       <div style={{ display: "flex", gap: 2, position: "relative" }}>
         <button onClick={() => setSnoozeOpen(s => !s)} style={styles.iconBtn} title="Snooze"><Clock size={14} /></button>
+        <button onClick={onQuickEdit} style={{ ...styles.iconBtn, color: "#5C7A3F" }} title="Quick edit"><Zap size={14} /></button>
         <button onClick={onEdit} style={styles.iconBtn} aria-label="Edit"><Edit2 size={14} /></button>
         {onDelete && (
           <button onClick={() => setConfirmDelete(true)} style={{ ...styles.iconBtn, color: confirmDelete ? "#A04848" : undefined }} title="Delete task"><Trash2 size={14} /></button>
@@ -1503,7 +1639,7 @@ function AllTasks({ tasks, allTasks, onEdit, onDelete, onAdd, onUnsnooze, onExpo
                   <td style={styles.td}>
                     {snoozed ? (
                       <button style={styles.snoozedPill} onClick={() => onUnsnooze(t.id)} title="Unsnooze">
-                        <Clock size={11} /> snoozed · {formatDate(t.snoozedUntil)}
+                        <Clock size={11} /> snoozed Â· {formatDate(t.snoozedUntil)}
                       </button>
                     ) : (<span style={{ color: "#C9C2B5" }}>active</span>)}
                   </td>
@@ -1535,12 +1671,23 @@ function AllTasks({ tasks, allTasks, onEdit, onDelete, onAdd, onUnsnooze, onExpo
 
 /* TASK FORM */
 function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, allTasks }) {
-  const [form, setForm] = useState(task ? { ...task, deadline: task.deadline ? task.deadline.slice(0, 10) : "" } : {
+  const [form, setForm] = useState(task ? {
+    ...task,
+    deadline: task.deadline ? task.deadline.slice(0, 10) : "",
+    taskFrequency: task.taskFrequency || task.frequency || "weekly",
+    repeatCycle: task.repeatCycle || "indefinitely",
+    availableFrom: task.availableFrom || "",
+    availableTo: task.availableTo || "",
+    visibleTo: task.visibleTo || [],
+    hiddenFrom: task.hiddenFrom || [],
+  } : {
     title: "", details: "", category: "life-admin", assignedTo: "Anyone",
-    frequency: "weekly", deadline: "", priority: "medium", notify: true,
-    repeat: task?.repeat || "none", repeatDays: task?.repeatDays || [],
-    estimatedCost: task?.estimatedCost || "", actualCost: task?.actualCost || "",
-    subtasks: task?.subtasks || [], notes: task?.notes || [],
+    taskFrequency: "weekly", frequency: "weekly", deadline: "", priority: "medium", notify: true,
+    repeatCycle: "indefinitely", repeatDays: [],
+    availableFrom: "", availableTo: "",
+    visibleTo: [], hiddenFrom: [],
+    estimatedCost: "", actualCost: "",
+    subtasks: [], notes: [],
   });
   const [parseBusy, setParseBusy] = useState(false);
   const [parseHint, setParseHint] = useState(null);
@@ -1656,11 +1803,11 @@ function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, al
           <div style={{ marginBottom: 12, padding: "10px 12px", background: "#F8F4EF", borderRadius: 8, border: "1px solid #E8E0D8" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: photoAnalysis ? 8 : 0 }}>
               <label htmlFor="photoCapture" style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#6B7280", padding: "5px 10px", background: "#fff", border: "1px solid #D1C9C0", borderRadius: 6 }}>
-                <span style={{ fontSize: 16 }}>📸</span>
-                {photoLoading ? "Analyzing…" : "Photo → Task"}
+                <span style={{ fontSize: 16 }}>ð¸</span>
+                {photoLoading ? "Analyzingâ¦" : "Photo â Task"}
               </label>
               <input id="photoCapture" type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={e => e.target.files[0] && handlePhotoCapture(e.target.files[0])} />
-              {photoAnalysis && <span style={{ fontSize: 12, color: "#059669" }}>✓ {photoAnalysis.identified}</span>}
+              {photoAnalysis && <span style={{ fontSize: 12, color: "#059669" }}>â {photoAnalysis.identified}</span>}
               {photoError && <span style={{ fontSize: 12, color: "#DC2626" }}>{photoError}</span>}
             </div>
             {photoAnalysis && photoAnalysis.tipsList && photoAnalysis.tipsList.length > 0 && (
@@ -1669,7 +1816,7 @@ function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, al
               </ul>
             )}
             {photoAnalysis && photoAnalysis.urgentIssue && (
-              <div style={{ marginTop: 4, padding: "3px 8px", background: "#FEF2F2", borderRadius: 4, fontSize: 12, color: "#DC2626" }}>⚠️ {photoAnalysis.urgentIssue}</div>
+              <div style={{ marginTop: 4, padding: "3px 8px", background: "#FEF2F2", borderRadius: 4, fontSize: 12, color: "#DC2626" }}>â ï¸ {photoAnalysis.urgentIssue}</div>
             )}
           </div>
         )}
@@ -1687,7 +1834,7 @@ function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, al
           )}
           {enrichSuggestions && enrichSuggestions.items && enrichSuggestions.items.length > 0 && (
             <div style={{ marginTop: 8, background: "#F6F3EE", borderRadius: 8, padding: "10px 12px", border: "1px solid #E0D9CF" }}>
-              <div style={{ fontSize: 12, color: "#6B6B6B", fontWeight: 600, marginBottom: 6 }}>AI suggestions — click to add to details:</div>
+              <div style={{ fontSize: 12, color: "#6B6B6B", fontWeight: 600, marginBottom: 6 }}>AI suggestions â click to add to details:</div>
               {enrichSuggestions.items.map((item, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 6 }}>
                   <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 10, background: item.type === "link" ? "#D4E6C3" : item.type === "instruction" ? "#D3E4F5" : item.type === "reminder" ? "#F5E6D3" : "#E8E4DE", color: "#1B2C3A", fontWeight: 600, whiteSpace: "nowrap", marginTop: 2 }}>{item.label || item.type}</span>
@@ -1699,7 +1846,7 @@ function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, al
             </div>
           )}
           {enrichSuggestions && enrichSuggestions.items && enrichSuggestions.items.length === 0 && !enrichSuggestions.error && (
-            <div style={{ fontSize: 12, color: "#5C7A3F", marginTop: 6 }}>No additional suggestions — the details look complete!</div>
+            <div style={{ fontSize: 12, color: "#5C7A3F", marginTop: 6 }}>No additional suggestions â the details look complete!</div>
           )}
         </Field>
         <Field label="Category">
@@ -1712,10 +1859,74 @@ function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, al
             {assigneeOptions.map(a => <option key={a} value={a}>{a}</option>)}
           </select>
         </Field>
-        <Field label="Frequency">
-          <select value={form.frequency} onChange={(e) => update("frequency", e.target.value)} style={styles.input}>
-            {FREQUENCIES.map(f => <option key={f.id} value={f.id}>{f.label}</option>)}
+        <Field label="Availability window" full>
+          <div style={{ display:"flex", gap:12, alignItems:"center", flexWrap:"wrap" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+              <label style={{ fontSize:12, color:"#6B6B6B" }}>From</label>
+              <input type="text" value={form.availableFrom || ""} onChange={(e) => update("availableFrom", e.target.value)} placeholder="MM-DD e.g. 03-15" style={{ ...styles.input, width:130 }} />
+            </div>
+            <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+              <label style={{ fontSize:12, color:"#6B6B6B" }}>To</label>
+              <input type="text" value={form.availableTo || ""} onChange={(e) => update("availableTo", e.target.value)} placeholder="MM-DD e.g. 10-31" style={{ ...styles.input, width:130 }} />
+            </div>
+          </div>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginTop:8 }}>
+            {[{l:"Growing season",f:"03-15",t:"10-31"},{l:"Winter",f:"11-01",t:"03-31"},{l:"Summer",f:"06-01",t:"08-31"},{l:"Q1",f:"01-01",t:"03-31"},{l:"Q2",f:"04-01",t:"06-30"},{l:"Q3",f:"07-01",t:"09-30"},{l:"Q4",f:"10-01",t:"12-31"},{l:"Clear",f:"",t:""}].map(p => (
+              <button key={p.l} type="button" onClick={() => { update("availableFrom",p.f); update("availableTo",p.t); }} style={{ ...styles.ghostBtn, fontSize:11, padding:"3px 8px" }}>{p.l}</button>
+            ))}
+          </div>
+          <div style={{ fontSize:11, color:"#8A8579", marginTop:4 }}>Leave blank = always available. For wrap-around (e.g. Nov–Mar), set From after To.</div>
+        </Field>
+        <Field label="Task frequency (within window)">
+          <select value={form.taskFrequency || form.frequency || "weekly"} onChange={(e) => update("taskFrequency", e.target.value)} style={styles.input}>
+            {TASK_FREQUENCIES.map(f => <option key={f.id} value={f.id}>{f.label}</option>)}
           </select>
+        </Field>
+        <Field label="Repeat cycle">
+          <select value={form.repeatCycle || "indefinitely"} onChange={(e) => update("repeatCycle", e.target.value)} style={styles.input}>
+            {REPEAT_CYCLES.map(r => <option key={r.id} value={r.id}>{r.label}</option>)}
+          </select>
+        </Field>
+        {(form.taskFrequency === "weekly" || (!form.taskFrequency && form.frequency === "weekly")) && (
+          <Field label="Repeat on days" full>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginTop:2 }}>
+              {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map((day, i) => {
+                const active = (form.repeatDays || []).includes(i);
+                return (
+                  <button key={i} type="button" onClick={() => { const cur = form.repeatDays || []; update("repeatDays", active ? cur.filter(d => d !== i) : [...cur, i]); }}
+                    style={{ padding:"6px 12px", borderRadius:20, border:"1.5px solid", borderColor:active?"#1B2C3A":"#D0CBB8", background:active?"#1B2C3A":"transparent", color:active?"#FAF7F2":"#6B6B6B", fontSize:13, fontWeight:500, cursor:"pointer", minWidth:44, minHeight:36 }}>
+                    {day}
+                  </button>
+                );
+              })}
+            </div>
+          </Field>
+        )}
+        <Field label="Privacy" full>
+          <div style={{ marginBottom:10 }}>
+            <label style={{ ...styles.label, display:"block", marginBottom:4 }}>Visible to (blank = everyone)</label>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+              {assigneeOptions.filter(a => !["Anyone","Family","Both Parents"].includes(a)).map(name => {
+                const active = (form.visibleTo || []).includes(name);
+                return <button key={name} type="button" onClick={() => { const cur=form.visibleTo||[]; update("visibleTo", active?cur.filter(n=>n!==name):[...cur,name]); }} style={{ padding:"5px 12px", borderRadius:20, border:"1.5px solid", borderColor:active?"#5C7A3F":"#D0CBB8", background:active?"#5C7A3F":"transparent", color:active?"#FAF7F2":"#6B6B6B", fontSize:13, cursor:"pointer" }}>{name}</button>;
+              })}
+            </div>
+          </div>
+          <div>
+            <label style={{ ...styles.label, display:"block", marginBottom:4 }}>Hidden from</label>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+              {assigneeOptions.filter(a => !["Anyone","Family","Both Parents"].includes(a)).map(name => {
+                const active = (form.hiddenFrom || []).includes(name);
+                return <button key={name} type="button" onClick={() => { const cur=form.hiddenFrom||[]; update("hiddenFrom", active?cur.filter(n=>n!==name):[...cur,name]); }} style={{ padding:"5px 12px", borderRadius:20, border:"1.5px solid", borderColor:active?"#A04848":"#D0CBB8", background:active?"#A04848":"transparent", color:active?"#FAF7F2":"#6B6B6B", fontSize:13, cursor:"pointer" }}>{name}</button>;
+              })}
+            </div>
+          </div>
+          {((form.visibleTo||[]).length > 0 || (form.hiddenFrom||[]).length > 0) && (
+            <div style={{ fontSize:11, color:"#8A8579", marginTop:6 }}>
+              {(form.visibleTo||[]).length > 0 && `Only visible to: ${form.visibleTo.join(", ")}. `}
+              {(form.hiddenFrom||[]).length > 0 && `Hidden from: ${form.hiddenFrom.join(", ")}.`}
+            </div>
+          )}
         </Field>
         <Field label="Priority">
           <select value={form.priority} onChange={(e) => update("priority", e.target.value)} style={styles.input}>
@@ -1777,13 +1988,13 @@ function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, al
             </div>
             {(form.repeatDays || []).length === 0 && (
               <div style={{ fontSize: 12, color: "#8A8579", marginTop: 4 }}>
-                No specific days — task is eligible any day of the week.
+                No specific days â task is eligible any day of the week.
               </div>
             )}
           </Field>
         )}
         <Field label="Budget (optional)">
-          <input type="text" value={form.estimatedCost || ""} onChange={(e) => update("estimatedCost", e.target.value)} placeholder="Estimated cost e.g. £300" style={styles.input} />
+          <input type="text" value={form.estimatedCost || ""} onChange={(e) => update("estimatedCost", e.target.value)} placeholder="Estimated cost e.g. Â£300" style={styles.input} />
         </Field>
         <Field label="Actual Cost">
           <input type="text" value={form.actualCost || ""} onChange={(e) => update("actualCost", e.target.value)} placeholder="Actual cost when known" style={styles.input} />
@@ -1797,7 +2008,7 @@ function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, al
             <div key={st.id||i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
               <input type="checkbox" checked={!!st.done} onChange={()=>{ const s=[...(form.subtasks||[])]; s[i]={...s[i],done:!s[i].done}; update("subtasks",s); }} />
               <span style={{flex:1,textDecoration:st.done?"line-through":"none",color:st.done?"#aaa":"inherit",fontSize:14}}>{st.text}</span>
-              <button type="button" onClick={()=>{ const s=(form.subtasks||[]).filter((_,j)=>j!==i); update("subtasks",s); }} style={{background:"none",border:"none",cursor:"pointer",color:"#c00",fontSize:14,padding:"0 4px"}}>✕</button>
+              <button type="button" onClick={()=>{ const s=(form.subtasks||[]).filter((_,j)=>j!==i); update("subtasks",s); }} style={{background:"none",border:"none",cursor:"pointer",color:"#c00",fontSize:14,padding:"0 4px"}}>â</button>
             </div>
           ))}
         </Field>
@@ -1810,7 +2021,7 @@ function TaskForm({ task, onSave, onCancel, onDelete, assigneeOptions, aiCfg, al
             <div key={n.id||i} style={{fontSize:13,padding:"5px 0",borderBottom:"1px solid #f0f0f0",display:"flex",gap:8}}>
               <span style={{color:"#aaa",whiteSpace:"nowrap"}}>{new Date(n.ts).toLocaleDateString()}</span>
               <span style={{flex:1}}>{n.text}</span>
-              <button type="button" onClick={()=>{ const ns=(form.notes||[]).filter(x=>x.id!==n.id); update("notes",ns); }} style={{background:"none",border:"none",cursor:"pointer",color:"#c00",fontSize:12}}>✕</button>
+              <button type="button" onClick={()=>{ const ns=(form.notes||[]).filter(x=>x.id!==n.id); update("notes",ns); }} style={{background:"none",border:"none",cursor:"pointer",color:"#c00",fontSize:12}}>â</button>
             </div>
           ))}
         </Field>
@@ -1871,21 +2082,21 @@ function EmailPreview({ tasks, weekRange, settings }) {
       lines.push("## " + cat.label.toUpperCase());
       items.forEach(t => {
         const freq = FREQUENCIES.find(f => f.id === t.frequency);
-        const deadline = t.deadline ? " · due " + formatDate(t.deadline) : "";
-        const prio = t.priority === "high" ? " · PRIORITY" : "";
+        const deadline = t.deadline ? " Â· due " + formatDate(t.deadline) : "";
+        const prio = t.priority === "high" ? " Â· PRIORITY" : "";
         const streak = calcStreak(t);
-        const streakStr = streak >= 2 ? " · \u{1F525}" + streak : "";
-        lines.push("• " + t.title + " (" + t.assignedTo + " · " + freq.label + deadline + streakStr + ")" + prio);
+        const streakStr = streak >= 2 ? " Â· \u{1F525}" + streak : "";
+        lines.push("â¢ " + t.title + " (" + t.assignedTo + " Â· " + freq.label + deadline + streakStr + ")" + prio);
         if (t.details) lines.push("    " + t.details);
       });
       lines.push("");
     });
     lines.push("---");
     lines.push("Reply to this email to update the ledger. Commands (one per line):");
-    lines.push("  ADD: Schedule dentist · Kids Activities · monthly · Parent 2");
+    lines.push("  ADD: Schedule dentist Â· Kids Activities Â· monthly Â· Parent 2");
     lines.push("  DONE: Pay mortgage");
-    lines.push("  SNOOZE: HVAC filter · until 2026-06-01");
-    lines.push("  EDIT: Family meeting · frequency · biweekly");
+    lines.push("  SNOOZE: HVAC filter Â· until 2026-06-01");
+    lines.push("  EDIT: Family meeting Â· frequency Â· biweekly");
     lines.push("  DELETE: Old task name");
     return lines.join("\n");
   }, [tasks, grouped, settings]);
@@ -2009,13 +2220,13 @@ function InsightsView({ tasks, events, aiCfg, identity, settings }) {
           {retro.wins && retro.wins.length > 0 && (
             <div style={{ marginBottom: 12 }}>
               <div style={styles.retroSection}>Wins</div>
-              {retro.wins.map((w, i) => <div key={i} style={styles.retroBullet}>• {w}</div>)}
+              {retro.wins.map((w, i) => <div key={i} style={styles.retroBullet}>â¢ {w}</div>)}
             </div>
           )}
           {retro.drift && retro.drift.length > 0 && (
             <div style={{ marginBottom: 12 }}>
               <div style={styles.retroSection}>Drift</div>
-              {retro.drift.map((w, i) => <div key={i} style={styles.retroBullet}>• {w}</div>)}
+              {retro.drift.map((w, i) => <div key={i} style={styles.retroBullet}>â¢ {w}</div>)}
             </div>
           )}
           {retro.suggestion && (
@@ -2050,7 +2261,7 @@ function InsightsView({ tasks, events, aiCfg, identity, settings }) {
           </p>
           {repeats.map((r, i) => (
             <div key={i} style={{ padding: "8px 0", borderTop: "1px solid #F0EAE0" }}>
-              <strong>{r.title}</strong> · added {r.count} times
+              <strong>{r.title}</strong> Â· added {r.count} times
             </div>
           ))}
         </div>
@@ -2076,7 +2287,7 @@ function InsightsView({ tasks, events, aiCfg, identity, settings }) {
         const parseAmt = (s) => { if (!s) return 0; const n = parseFloat(String(s).replace(/[^0-9.]/g,"")); return isNaN(n)?0:n; };
         const totalEst = tracked.reduce((s,t)=>s+parseAmt(t.estimatedCost),0);
         const totalAct = tracked.reduce((s,t)=>s+parseAmt(t.actualCost),0);
-        const fmt = (n) => n === 0 ? "—" : (n % 1 === 0 ? "£"+n : "£"+n.toFixed(2));
+        const fmt = (n) => n === 0 ? "â" : (n % 1 === 0 ? "Â£"+n : "Â£"+n.toFixed(2));
         return (
           <div style={{ ...styles.formCard, marginTop: 16 }}>
             <h3 style={{ ...styles.categoryTitle, marginBottom: 12 }}>Budget Tracker ({tracked.length} tasks)</h3>
@@ -2094,7 +2305,7 @@ function InsightsView({ tasks, events, aiCfg, identity, settings }) {
               <div key={t.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0", borderBottom:"1px solid #f0f0f0", fontSize:13 }}>
                 <span style={{ flex:1 }}>{t.title}</span>
                 <span style={{ color:"#888", marginRight:12 }}>est {fmt(parseAmt(t.estimatedCost))}</span>
-                <span style={{ color: parseAmt(t.actualCost) > parseAmt(t.estimatedCost) && parseAmt(t.estimatedCost)>0 ? "#A04848" : "#4A6B4A", fontWeight:600 }}>{t.actualCost ? "act "+fmt(parseAmt(t.actualCost)) : "—"}</span>
+                <span style={{ color: parseAmt(t.actualCost) > parseAmt(t.estimatedCost) && parseAmt(t.estimatedCost)>0 ? "#A04848" : "#4A6B4A", fontWeight:600 }}>{t.actualCost ? "act "+fmt(parseAmt(t.actualCost)) : "â"}</span>
               </div>
             ))}
           </div>
@@ -2249,11 +2460,11 @@ function Settings({ settings, onSave, identity, onResetIdentity, backendUrl, sha
       </div>
       <div style={{ ...styles.formCard, marginTop: 24 }}>
 
-        {/* ── Google Services Integration ── */}
+        {/* ââ Google Services Integration ââ */}
         <h2 style={styles.sectionTitle}>Google Services</h2>
         <p style={styles.mutedText}>
           Connect to Gmail, Google Calendar, and Google Tasks (Keep).
-          Runs through your Apps Script — no extra OAuth needed.
+          Runs through your Apps Script â no extra OAuth needed.
         </p>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
           <button
@@ -2261,22 +2472,22 @@ function Settings({ settings, onSave, identity, onResetIdentity, backendUrl, sha
             disabled={googleLoading}
             onClick={() => { if (onFetchGoogle) onFetchGoogle(true); }}
           >
-            {googleLoading ? "Connecting…" : "🔗 Connect / Refresh Google"}
+            {googleLoading ? "Connectingâ¦" : "ð Connect / Refresh Google"}
           </button>
           {googleCtx && googleCtx.ok && (
             <span style={{ fontSize: 13, color: "#5C7A3F" }}>
-              ✓ Connected — {googleCtx.emails.length} emails · {googleCtx.events.length} events · {googleCtx.tasks.length} tasks
+              â Connected â {googleCtx.emails.length} emails Â· {googleCtx.events.length} events Â· {googleCtx.tasks.length} tasks
             </span>
           )}
           {googleCtx && !googleCtx.ok && (
             <span style={{ fontSize: 13, color: "#C9603C" }}>
-              ✗ {googleCtx.errorMessage || "Could not connect"}
+              â {googleCtx.errorMessage || "Could not connect"}
             </span>
           )}
         </div>
         {googleCtx && googleCtx.errors && googleCtx.errors.length > 0 && (
           <p style={{ fontSize: 12, color: "#8A8579", marginTop: 4 }}>
-            Partial errors: {googleCtx.errors.map(e => e.service + ": " + e.error).join(" · ")}
+            Partial errors: {googleCtx.errors.map(e => e.service + ": " + e.error).join(" Â· ")}
           </p>
         )}
         <p style={{ ...styles.mutedText, marginTop: 6 }}>
@@ -2322,12 +2533,30 @@ function Settings({ settings, onSave, identity, onResetIdentity, backendUrl, sha
                 if (!("Notification" in window)) { alert("Notifications not supported."); return; }
                 if (Notification.permission === "denied") { alert("Notifications blocked. Reset in browser settings."); return; }
                 const show = () => new Notification("Family Ledger", {
-                  body: "Test notification — push is working on this device!",
+                  body: "Test notification â push is working on this device!",
                   icon: "/icon-192.png",
                 });
                 if (Notification.permission === "granted") { show(); }
                 else { Notification.requestPermission().then(p => { if (p === "granted") show(); else alert("Permission denied."); }); }
               }}><Bell size={14} /> Send test notification</button>
+            <div style={{ marginTop:20, borderTop:"1px solid #E8E4DC", paddingTop:16 }}>
+              <h4 style={{ fontSize:14, fontWeight:600, margin:"0 0 12px" }}>Daily notification times</h4>
+              <p style={{ fontSize:12, color:"#8A8579", margin:"0 0 12px" }}>When each person gets their daily task list email. After changing, run setupAll() in Apps Script.</p>
+              {[...draft.parentNames, ...(draft.kidNames||[])].filter(Boolean).map(name => (
+                <div key={name} style={{ display:"flex", alignItems:"center", gap:12, marginBottom:10 }}>
+                  <label style={{ width:80, fontSize:13, fontWeight:500 }}>{name}</label>
+                  <input type="time" value={(draft.digestTimes||{})[name]||"06:00"} onChange={(e) => update("digestTimes", {...(draft.digestTimes||{}), [name]:e.target.value})} style={{ ...styles.input, width:130 }} />
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop:16, borderTop:"1px solid #E8E4DC", paddingTop:16 }}>
+              <h4 style={{ fontSize:14, fontWeight:600, margin:"0 0 8px" }}>Daily task limit</h4>
+              <p style={{ fontSize:12, color:"#8A8579", margin:"0 0 12px" }}>Max tasks shown per day in This Week. Extra tasks appear in Outstanding tab.</p>
+              <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                <input type="number" min="1" max="50" value={draft.dailyTaskLimit||5} onChange={(e) => update("dailyTaskLimit", parseInt(e.target.value)||5)} style={{ ...styles.input, width:70 }} />
+                <span style={{ fontSize:13, color:"#6B6B6B" }}>tasks/day ({(draft.dailyTaskLimit||5)*7} total/week shown in This Week)</span>
+              </div>
+            </div>
             </div>
           </>
         )}
@@ -2426,7 +2655,7 @@ const stripped = toAdd.map(p => {
     if (typeof onAddTasks === "function") {
       onAddTasks(stripped);
     } else {
-      // Fallback if parent didn't pass onAddTasks — adds will be lossy
+      // Fallback if parent didn't pass onAddTasks â adds will be lossy
       // (stale-closure bug), but at least one task lands.
       stripped.forEach(task => onAddTask(task));
     }
@@ -2526,10 +2755,10 @@ function ProposedTaskCard({ task, categories, frequencies, assigneeOptions, onTo
             {task.details && <div style={{ fontSize: 13, color: "#6B6B6B", marginBottom: 6 }}>{task.details}</div>}
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 12, color: "#8A8579" }}>
               <span>{task.assignedTo}</span>
-              <span>· {task.frequency}</span>
-              <span>· {task.priority}</span>
-              <span>· {task.category}</span>
-              {task.deadline && <span>· due {task.deadline}</span>}
+              <span>Â· {task.frequency}</span>
+              <span>Â· {task.priority}</span>
+              <span>Â· {task.category}</span>
+              {task.deadline && <span>Â· due {task.deadline}</span>}
             </div>
             {task.reasoning && (
               <div style={{ fontSize: 11, color: "#C9603C", marginTop: 6, fontStyle: "italic" }}>{task.reasoning}</div>
@@ -2660,7 +2889,7 @@ function RemindersView({ remindersList, onSaveReminders, onAddTask, loading, onR
     return da - db;
   });
 
-  const typeEmoji = (type) => REMINDER_TYPES.find(t => t.id === type)?.emoji || "📅";
+  const typeEmoji = (type) => REMINDER_TYPES.find(t => t.id === type)?.emoji || "ð";
   const typeLabel = (type) => REMINDER_TYPES.find(t => t.id === type)?.label || "Event";
 
   const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -2669,10 +2898,10 @@ function RemindersView({ remindersList, onSaveReminders, onAddTask, loading, onR
   return (
     <div style={{ maxWidth: 640, margin: "0 auto", padding: "16px 16px 80px" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#1C170D" }}>🔔 Reminders</h2>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#1C170D" }}>ð Reminders</h2>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={onRefresh} disabled={loading} style={{ padding: "6px 12px", background: "#F3F0EB", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 13 }}>
-            {loading ? "…" : "↻"}
+            {loading ? "â¦" : "â»"}
           </button>
           <button onClick={startNew} style={{ padding: "6px 14px", background: "#D4A017", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
             + Add
@@ -2686,7 +2915,7 @@ function RemindersView({ remindersList, onSaveReminders, onAddTask, loading, onR
         if (!soon.length) return null;
         return (
           <div style={{ background: "#FEF3C7", border: "1px solid #FCD34D", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 13 }}>
-            <strong>⏰ Coming up:</strong>{" "}
+            <strong>â° Coming up:</strong>{" "}
             {soon.slice(0,3).map(r => {
               const days = reminderDaysUntil(r);
               return <span key={r.id} style={{ marginRight: 10 }}>{typeEmoji(r.type)} {r.name} in {days}d</span>;
@@ -2769,17 +2998,17 @@ function RemindersView({ remindersList, onSaveReminders, onAddTask, loading, onR
                 <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#1C170D" }}>
                     {typeEmoji(r.type)} {r.name}
-                    {age ? <span style={{ fontWeight: 400, color: "#6B7280", fontSize: 13 }}> · turns {age}</span> : null}
+                    {age ? <span style={{ fontWeight: 400, color: "#6B7280", fontSize: 13 }}> Â· turns {age}</span> : null}
                   </div>
                   <div style={{ fontSize: 13, color: "#6B7280", marginTop: 2 }}>
-                    {typeLabel(r.type)} · {MONTHS[r.month-1]} {r.day}
+                    {typeLabel(r.type)} Â· {MONTHS[r.month-1]} {r.day}
                     <span style={{ marginLeft: 8, fontWeight: 600, color: isUrgent ? "#D97706" : "#4B5563" }}>
-                      {days === 0 ? "🎉 Today!" : days + " days away"}
+                      {days === 0 ? "ð Today!" : days + " days away"}
                     </span>
                   </div>
                   {r.giftfulUrl && (
                     <a href={r.giftfulUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: "#D4A017", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 3, marginTop: 3 }}>
-                      🎁 Giftful Wishlist
+                      ð Giftful Wishlist
                     </a>
                   )}
                   {(r.leadDays || []).length > 0 && (
@@ -2792,8 +3021,8 @@ function RemindersView({ remindersList, onSaveReminders, onAddTask, loading, onR
                   <button onClick={() => handleCreateTask(r)} title="Add task to ledger" style={{ padding: "4px 8px", background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 6, cursor: "pointer", fontSize: 12, color: "#059669" }}>
                     + Task
                   </button>
-                  <button onClick={() => startEdit(r)} title="Edit" style={{ padding: "4px 8px", background: "#F3F0EB", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12 }}>✏️</button>
-                  <button onClick={() => handleDelete(r.id)} title="Delete" style={{ padding: "4px 8px", background: "#FEF2F2", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, color: "#DC2626" }}>✕</button>
+                  <button onClick={() => startEdit(r)} title="Edit" style={{ padding: "4px 8px", background: "#F3F0EB", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12 }}>âï¸</button>
+                  <button onClick={() => handleDelete(r.id)} title="Delete" style={{ padding: "4px 8px", background: "#FEF2F2", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, color: "#DC2626" }}>â</button>
                 </div>
               </div>
               {r.notes && <div style={{ marginTop: 6, fontSize: 12, color: "#6B7280", fontStyle: "italic" }}>{r.notes}</div>}
@@ -2988,7 +3217,7 @@ function TodayView({ digest, digestLoading, digestError, digestDate, onGenerate,
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
           <div style={{ flex: 1 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
-              {isDone && <span style={{ fontSize: 13, color: "#5C7A3F" }}>✓</span>}
+              {isDone && <span style={{ fontSize: 13, color: "#5C7A3F" }}>â</span>}
               <span style={{ fontWeight: 600, fontSize: 14, color: isDone ? "#8A8579" : "#1B2C3A",
                              textDecoration: isDone ? "line-through" : "none" }}>{t.title}</span>
               {isBonus && <span style={{ fontSize: 10, background: "#E5DFD3", color: "#6B6B6B",
@@ -3008,7 +3237,7 @@ function TodayView({ digest, digestLoading, digestError, digestDate, onGenerate,
                     style={{ flexShrink: 0, width: 44, height: 44, borderRadius: 22, border: "2px solid",
                              borderColor: isDone ? "#5C7A3F" : "#D0CBB8", background: isDone ? "#5C7A3F" : "transparent",
                              cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, color: isDone ? "#fff" : "transparent", touchAction: "manipulation" }}>
-              {isDone ? "✓" : ""}
+              {isDone ? "â" : ""}
             </button>
           )}
         </div>
@@ -3030,14 +3259,14 @@ function TodayView({ digest, digestLoading, digestError, digestDate, onGenerate,
             {name}{isMe ? " (you)" : ""}
           </h3>
           <span style={{ fontSize: 12, color: "#8A8579" }}>
-            {(list.main || []).length} tasks · {(list.bonus || []).length} bonus
+            {(list.main || []).length} tasks Â· {(list.bonus || []).length} bonus
           </span>
         </div>
         {(list.main || []).map((t, i) => <TaskCard key={t.id || i} t={t} isBonus={false} />)}
         {(list.bonus || []).length > 0 && (
           <div style={{ marginTop: 8 }}>
             <div style={{ fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "#8A8579", marginBottom: 6 }}>
-              Bonus — if you have time
+              Bonus â if you have time
             </div>
             {(list.bonus || []).map((t, i) => <TaskCard key={t.id || i} t={t} isBonus={true} />)}
           </div>
@@ -3054,7 +3283,7 @@ function TodayView({ digest, digestLoading, digestError, digestDate, onGenerate,
             Today's Tasks
           </h2>
           {digestDate && <div style={{ fontSize: 12, color: "#8A8579", marginTop: 2 }}>
-            {isStale ? "⚠ From " + digestDate + " — regenerate?" : "Generated for " + digestDate}
+            {isStale ? "â  From " + digestDate + " â regenerate?" : "Generated for " + digestDate}
           </div>}
         </div>
         <button onClick={onGenerate} disabled={digestLoading}
@@ -3062,7 +3291,7 @@ function TodayView({ digest, digestLoading, digestError, digestDate, onGenerate,
                          background: "#1B2C3A", color: "#FAF7F2", border: "none", borderRadius: 6,
                          fontSize: 13, fontWeight: 500, cursor: digestLoading ? "not-allowed" : "pointer", opacity: digestLoading ? 0.7 : 1 }}>
           <ListChecks size={14} />
-          {digestLoading ? "Generating…" : digest ? "Refresh" : "Generate"}
+          {digestLoading ? "Generatingâ¦" : digest ? "Refresh" : "Generate"}
         </button>
       </div>
 
@@ -3083,7 +3312,7 @@ function TodayView({ digest, digestLoading, digestError, digestDate, onGenerate,
 
       {digestLoading && (
         <div style={{ textAlign: "center", padding: "48px 24px", color: "#8A8579" }}>
-          <div style={{ fontFamily: "Georgia,serif", fontSize: 16 }}>Generating your daily digest…</div>
+          <div style={{ fontFamily: "Georgia,serif", fontSize: 16 }}>Generating your daily digestâ¦</div>
           <div style={{ fontSize: 13, marginTop: 8 }}>Claude is analyzing tasks and priorities.</div>
         </div>
       )}
