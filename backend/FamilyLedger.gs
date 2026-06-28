@@ -1,24 +1,24 @@
 /**
- * The Family Ledger — Apps Script backend
+ * The Family Ledger â Apps Script backend
  * =========================================
  *
  * Paste this whole file into your Google Apps Script project, bound to
- * your Family Ledger Google Sheet (Extensions → Apps Script).
+ * your Family Ledger Google Sheet (Extensions â Apps Script).
  *h
- * Required Script Properties (Project Settings → Script Properties):
- *   ANTHROPIC_API_KEY   (optional) — enables ?action=ai for AI features
- *   SHARED_SECRET       (optional) — if set, all requests must include &secret=...
- *   PUSH_RELAY_URL      (optional) — your web-push relay (Cloudflare Worker etc.)
- *   PUSH_RELAY_TOKEN    (optional) — bearer token your relay expects
+ * Required Script Properties (Project Settings â Script Properties):
+ *   ANTHROPIC_API_KEY   (optional) â enables ?action=ai for AI features
+ *   SHARED_SECRET       (optional) â if set, all requests must include &secret=...
+ *   PUSH_RELAY_URL      (optional) â your web-push relay (Cloudflare Worker etc.)
+ *   PUSH_RELAY_TOKEN    (optional) â bearer token your relay expects
  *
  * One-time setup (run once from the Apps Script editor):
- *   1. Run setupAll()  — creates the Tasks / Settings / PushSubs sheets and installs triggers.
- *   2. Click Deploy → New deployment → Web app:
+ *   1. Run setupAll()  â creates the Tasks / Settings / PushSubs sheets and installs triggers.
+ *   2. Click Deploy â New deployment â Web app:
  *        Execute as: me
  *        Who has access: Anyone   (NOT "Anyone with Google account")
  *      Copy the /exec URL into the PWA Settings page.
  * 3. Enable Google Tasks API (for Keep/Tasks integration):
- *    In Apps Script editor → Services (+) button → find "Tasks API" → Add.
+ *    In Apps Script editor â Services (+) button â find "Tasks API" â Add.
  *    Without this step, the google-import action won't read Google Tasks.
  */
 
@@ -31,15 +31,17 @@ const SHEET_SETTINGS = "Settings";
 const SHEET_PUSH     = "PushSubs";
 
 const TASK_HEADERS = [
-  "id","title","details","category","assignedTo","frequency","priority",
+  "id","title","details","category","assignedTo","taskFrequency","priority",
   "deadline","lastCompleted","completionHistory","completionLog",
   "snoozedUntil","createdAt","lastModified",
+  "availableFrom","availableTo","repeatCycle",
+  "visibleTo","hiddenFrom",
 ];
 
 const ANTHROPIC_MODEL = "claude-sonnet-4-5";
 
 /* =========================================================================
- *  ENTRY POINTS — doGet / doPost
+ *  ENTRY POINTS â doGet / doPost
  * ========================================================================= */
 
 function doGet(e) {
@@ -71,6 +73,7 @@ function doPost(e) {
     if (action === "google-search") return jsonOut_(googleSearch_(body));
     if (action === "save-reminders")  return jsonOut_(saveReminders_(body));
     if (action === "daily-digest")  return jsonOut_(handleDailyDigest_(body));
+    if (body.action === "save-settings") return jsonOut_(saveSettings_(body));
     return jsonOut_({ error: "Unknown action: " + action });
   } catch (err) {
     return jsonOut_({ error: String(err && err.message || err) });
@@ -122,12 +125,14 @@ function ensureSheets_() {
     settings = ss.insertSheet(SHEET_SETTINGS);
     settings.getRange(1,1,1,2).setValues([["key","value"]]).setFontWeight("bold");
     settings.setFrozenRows(1);
-    settings.getRange(2,1,5,2).setValues([
-      ["parentNames",   "Parent 1,Parent 2"],
-      ["kidNames",      "Kid 1"],
-      ["parentEmails",  ""],
-      ["dailyDigestAt", "20:00"],
-      ["weeklyEmailAt", "07:00"],
+    settings.getRange(2,1,7,2).setValues([
+      ["parentNames",    "Parent 1,Parent 2"],
+      ["kidNames",       "Kid 1"],
+      ["parentEmails",   ""],
+      ["dailyDigestAt",  "06:00"],
+      ["weeklyEmailAt",  "07:00"],
+      ["dailyTaskLimit", "5"],
+      ["digestTimes",    "{}"],
     ]);
   }
   let push = ss.getSheetByName(SHEET_PUSH);
@@ -140,50 +145,55 @@ function ensureSheets_() {
 }
 
 function loadAll_() {
-  const { tasks } = ensureSheets_();
-  const last = tasks.getLastRow();
+  var sheets = ensureSheets_();
+  var tasks = sheets.tasks;
+  var last = tasks.getLastRow();
   if (last < 2) return { tasks: [], lastModified: null };
-  const data = tasks.getRange(2, 1, last - 1, TASK_HEADERS.length).getValues();
-  let maxModified = 0;
-  const out = data.map(row => {
-    const obj = {};
-    TASK_HEADERS.forEach((h, i) => obj[h] = row[i]);
+  var data = tasks.getRange(2, 1, last - 1, TASK_HEADERS.length).getValues();
+  var maxModified = null;
+  var out = data.map(function(row) {
+    var obj = {};
+    TASK_HEADERS.forEach(function(h, i) { obj[h] = row[i] !== undefined ? row[i] : null; });
     obj.completionHistory = parseJsonField_(obj.completionHistory, []);
-    obj.completionLog     = parseJsonField_(obj.completionLog, []);
-    obj.lastCompleted     = obj.lastCompleted || null;
-    obj.snoozedUntil      = obj.snoozedUntil || null;
-    obj.deadline          = obj.deadline || null;
-    obj.createdAt         = Number(obj.createdAt) || 0;
-    obj.lastModified      = Number(obj.lastModified) || obj.createdAt || 0;
-    if (obj.lastModified > maxModified) maxModified = obj.lastModified;
+    obj.completionLog     = parseJsonField_(obj.completionLog,     []);
+    obj.visibleTo         = parseJsonField_(obj.visibleTo,         []);
+    obj.hiddenFrom        = parseJsonField_(obj.hiddenFrom,        []);
+    if (!obj.taskFrequency && obj.frequency) obj.taskFrequency = obj.frequency;
+    if (!obj.taskFrequency) obj.taskFrequency = "weekly";
+    if (!obj.repeatCycle) obj.repeatCycle = "indefinitely";
+    var mod = obj.lastModified ? Number(obj.lastModified) : 0;
+    if (!maxModified || mod > maxModified) maxModified = mod;
     return obj;
-  }).filter(t => t.id);
-  // Also surface the household roster so the PWA can sync names/emails
-  // across all devices from a single source of truth (the Sheet's Settings tab).
-  const householdSettings = getSettings_();
+  });
+  var householdSettings = getSettings_();
   return {
     tasks: out,
     lastModified: maxModified,
     settings: {
-      parentNames:  householdSettings.parentNames  || [],
-      kidNames:     householdSettings.kidNames     || [],
-      parentEmails: householdSettings.parentEmails || [],
+      parentNames:    householdSettings.parentNames  || [],
+      kidNames:       householdSettings.kidNames     || [],
+      parentEmails:   householdSettings.parentEmails || [],
+      dailyTaskLimit: householdSettings.dailyTaskLimit || 5,
+      digestTimes:    householdSettings.digestTimes  || {},
     },
   };
 }
 
 function saveAll_(data) {
-  const { tasks } = ensureSheets_();
-  const arr = (data.tasks || []).filter(t => t && t.id);
-  // Replace the contents wholesale — last-write-wins per onboarding doc.
+  var sheets = ensureSheets_();
+  var tasks = sheets.tasks;
+  var arr = data.tasks || [];
   tasks.clear();
   tasks.getRange(1,1,1,TASK_HEADERS.length).setValues([TASK_HEADERS]).setFontWeight("bold");
   if (arr.length > 0) {
-    const rows = arr.map(t => TASK_HEADERS.map(h => {
-      const v = t[h];
-      if (h === "completionHistory" || h === "completionLog") return JSON.stringify(v || []);
-      return v == null ? "" : v;
-    }));
+    var rows = arr.map(function(t) {
+      return TASK_HEADERS.map(function(h) {
+        var v = t[h];
+        if (v === null || v === undefined) return "";
+        if (Array.isArray(v)) return JSON.stringify(v);
+        return v;
+      });
+    });
     tasks.getRange(2,1,rows.length,TASK_HEADERS.length).setValues(rows);
   }
   tasks.setFrozenRows(1);
@@ -227,7 +237,7 @@ function sendWeeklyEmail() {
   const week = currentWeekRange_();
   const due = tasks.filter(function (t) { return isDueThisWeek_(t, week); });
   const subject = "The Week of " + Utilities.formatDate(week.start, Session.getScriptTimeZone(), "MMMM d") +
-                  " — " + due.length + " items on the ledger";
+                  " â " + due.length + " items on the ledger";
 
   const text = composeWeeklyEmailText_(due, settings);
   const html = composeWeeklyEmailHtml_(due, settings, week);
@@ -252,20 +262,20 @@ function composeWeeklyEmailText_(due, settings) {
   groupByCategory_(due).forEach(function (g) {
     lines.push("## " + String(g.category).toUpperCase());
     g.items.forEach(function (t) {
-      const meta = [t.assignedTo, t.frequency].filter(Boolean).join(" · ");
-      const dl = t.deadline ? " · due " + formatDate_(t.deadline) : "";
-      const prio = (t.priority === "high") ? " · PRIORITY" : "";
-      lines.push("• " + t.title + " (" + meta + dl + ")" + prio);
+      const meta = [t.assignedTo, t.frequency].filter(Boolean).join(" Â· ");
+      const dl = t.deadline ? " Â· due " + formatDate_(t.deadline) : "";
+      const prio = (t.priority === "high") ? " Â· PRIORITY" : "";
+      lines.push("â¢ " + t.title + " (" + meta + dl + ")" + prio);
       if (t.details) lines.push("    " + t.details);
     });
     lines.push("");
   });
   lines.push("---");
   lines.push("Reply to this email to update the ledger. Commands (one per line):");
-  lines.push("  ADD: Schedule dentist · Kids Activities · monthly · Parent 2");
+  lines.push("  ADD: Schedule dentist Â· Kids Activities Â· monthly Â· Parent 2");
   lines.push("  DONE: Pay mortgage");
-  lines.push("  SNOOZE: HVAC filter · until 2026-06-01");
-  lines.push("  EDIT: Family meeting · frequency · biweekly");
+  lines.push("  SNOOZE: HVAC filter Â· until 2026-06-01");
+  lines.push("  EDIT: Family meeting Â· frequency Â· biweekly");
   lines.push("  DELETE: Old task name");
   return lines.join("\n");
 }
@@ -273,11 +283,11 @@ function composeWeeklyEmailText_(due, settings) {
 function composeWeeklyEmailHtml_(due, settings, week) {
   const sections = groupByCategory_(due).map(function (g) {
     const lis = g.items.map(function (t) {
-      const dl = t.deadline ? ' <span style="color:#8A8579">· due ' + formatDate_(t.deadline) + '</span>' : "";
+      const dl = t.deadline ? ' <span style="color:#8A8579">Â· due ' + formatDate_(t.deadline) + '</span>' : "";
       const prio = (t.priority === "high") ? ' <span style="color:#C9603C;font-weight:600">PRIORITY</span>' : "";
       const details = t.details ? '<div style="font-size:13px;color:#6B6B6B;margin-top:2px">' + escapeHtml_(t.details) + '</div>' : "";
       return '<li style="margin:8px 0"><strong>' + escapeHtml_(t.title) + '</strong> ' +
-        '<span style="color:#8A8579">(' + escapeHtml_(t.assignedTo) + ' · ' + escapeHtml_(t.frequency) + ')</span>' +
+        '<span style="color:#8A8579">(' + escapeHtml_(t.assignedTo) + ' Â· ' + escapeHtml_(t.frequency) + ')</span>' +
         dl + prio + details + '</li>';
     }).join("");
     return '<h3 style="font-family:Georgia,serif;color:#1B2C3A;margin:24px 0 8px;border-bottom:1px solid #E5DFD3;padding-bottom:6px">' +
@@ -348,7 +358,7 @@ function sendDailyDigest() {
 
   sendPushToAll_({
     title: doneToday === due.length ? "All clear for today" : doneToday + " of " + due.length + " done today",
-    body:  openCount === 0 ? "Nice — no open items left this week." : openCount + " still open this week.",
+    body:  openCount === 0 ? "Nice â no open items left this week." : openCount + " still open this week.",
     url:   "/?view=dashboard",
     tag:   "daily-digest",
   });
@@ -401,7 +411,7 @@ function applyReplyCommands_(body, tasks) {
 
     if (/^ADD\s*:/i.test(line)) {
       const rest = line.replace(/^ADD\s*:/i, "").trim();
-      const parts = rest.split("·").map(function (s) { return s.trim(); });
+      const parts = rest.split("Â·").map(function (s) { return s.trim(); });
       const title = parts[0]; const category = parts[1]; const frequency = parts[2]; const assignedTo = parts[3];
       if (!title) return;
       tasks.push({
@@ -436,7 +446,7 @@ function applyReplyCommands_(body, tasks) {
 
     if (/^SNOOZE\s*:/i.test(line)) {
       const rest = line.replace(/^SNOOZE\s*:/i, "").trim();
-      const m = rest.match(/^(.+?)\s*·\s*until\s+(\d{4}-\d{2}-\d{2})/i);
+      const m = rest.match(/^(.+?)\s*Â·\s*until\s+(\d{4}-\d{2}-\d{2})/i);
       if (m) {
         const t = findTask_(tasks, m[1].trim());
         if (t) { t.snoozedUntil = m[2]; t.lastModified = now; changed = true; }
@@ -445,7 +455,7 @@ function applyReplyCommands_(body, tasks) {
 
     if (/^EDIT\s*:/i.test(line)) {
       const rest = line.replace(/^EDIT\s*:/i, "").trim();
-      const parts = rest.split("·").map(function (s) { return s.trim(); });
+      const parts = rest.split("Â·").map(function (s) { return s.trim(); });
       if (parts.length >= 3) {
         const t = findTask_(tasks, parts[0]);
         if (t && Object.prototype.hasOwnProperty.call(t, parts[1])) {
@@ -475,7 +485,7 @@ function fuzzyEq_(a, b) {
 }
 
 /* =========================================================================
- *  AI PROXY  (Apps Script → Anthropic API)
+ *  AI PROXY  (Apps Script â Anthropic API)
  * ========================================================================= */
 
 function aiProxy_(body) {
@@ -637,30 +647,93 @@ function escapeHtml_(s) {
 }
 
 /* =========================================================================
- *  ONE-TIME SETUP — run these from the Apps Script editor
+ *  ONE-TIME SETUP â run these from the Apps Script editor
  * ========================================================================= */
 
 function setupAll() {
   ensureSheets_();
   setupTriggers_();
   try {
-    Browser.msgBox("Family Ledger setup complete. Now deploy: Deploy → New deployment → Web app → Anyone.");
+    Browser.msgBox("Family Ledger setup complete. Now deploy: Deploy â New deployment â Web app â Anyone.");
   } catch (e) {
-    Logger.log("Setup complete. Now Deploy → New deployment → Web app → Anyone.");
+    Logger.log("Setup complete. Now Deploy â New deployment â Web app â Anyone.");
   }
 }
 
 function setupTriggers_() {
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
-
   ScriptApp.newTrigger("sendWeeklyEmail").timeBased()
     .onWeekDay(ScriptApp.WeekDay.SUNDAY).atHour(7).create();
-
   ScriptApp.newTrigger("processReplies").timeBased()
     .everyMinutes(10).create();
+  setupPersonalDigestTriggers_();
+}
 
-  ScriptApp.newTrigger("sendDailyDigestEmail").timeBased()
-    .everyDays(1).atHour(20).create();
+function setupPersonalDigestTriggers_() {
+  var settings = getSettings_();
+  var digestTimes = {};
+  try { digestTimes = JSON.parse(settings.digestTimes || "{}"); } catch(e) {}
+  var names = (settings.parentNames || []).concat(settings.kidNames || []);
+  var hoursUsed = {};
+  names.forEach(function(name) {
+    var timeStr = digestTimes[name] || settings.dailyDigestAt || "06:00";
+    var hour = parseInt(timeStr.split(":")[0], 10);
+    if (isNaN(hour)) hour = 6;
+    if (!hoursUsed[hour]) {
+      hoursUsed[hour] = true;
+      ScriptApp.newTrigger("sendDailyDigestEmail").timeBased()
+        .everyDays(1).atHour(hour).create();
+    }
+  });
+  if (Object.keys(hoursUsed).length === 0) {
+    ScriptApp.newTrigger("sendDailyDigestEmail").timeBased()
+      .everyDays(1).atHour(6).create();
+  }
+}
+
+function saveSettings_(body) {
+  try {
+    var sheets = ensureSheets_();
+    var sh = sheets.settings;
+    var updates = body.settings || {};
+    var existing = getSettings_();
+    Object.keys(updates).forEach(function(k) { existing[k] = updates[k]; });
+    sh.clearContents();
+    sh.getRange(1,1,1,2).setValues([["key","value"]]).setFontWeight("bold");
+    sh.setFrozenRows(1);
+    var rows = Object.keys(existing).map(function(k) {
+      var v = existing[k];
+      return [k, (typeof v === "object") ? JSON.stringify(v) : String(v)];
+    });
+    if (rows.length > 0) sh.getRange(2,1,rows.length,2).setValues(rows);
+    return { ok: true };
+  } catch(e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+function isTaskAvailableToday_(task, todayStr) {
+  if (!task.availableFrom && !task.availableTo) return true;
+  var today = new Date(todayStr + "T12:00:00");
+  var mm = String(today.getMonth()+1).padStart(2,"0");
+  var dd = String(today.getDate()).padStart(2,"0");
+  var todayMMDD = mm + "-" + dd;
+  var from = task.availableFrom || null;
+  var to   = task.availableTo   || null;
+  if (from && to && from > to) return todayMMDD >= from || todayMMDD <= to;
+  if (from && todayMMDD < from) return false;
+  if (to   && todayMMDD > to)   return false;
+  return true;
+}
+
+function isVisibleTo_(task, personName) {
+  var visibleTo  = task.visibleTo  || [];
+  var hiddenFrom = task.hiddenFrom || [];
+  if (typeof visibleTo  === "string") { try { visibleTo  = JSON.parse(visibleTo);  } catch(e) { visibleTo  = []; } }
+  if (typeof hiddenFrom === "string") { try { hiddenFrom = JSON.parse(hiddenFrom); } catch(e) { hiddenFrom = []; } }
+  if (hiddenFrom.length > 0 && hiddenFrom.indexOf(personName) >= 0) return false;
+  if (visibleTo.length  > 0 && visibleTo.indexOf(personName)  < 0)  return false;
+  return true;
 }
 
 
@@ -671,9 +744,9 @@ function setupTriggers_() {
  * These run inside Apps Script as the script owner, so they have access
  * to the owner's Gmail, Calendar, and Tasks (Keep tasks sync via Tasks API).
  *
- * doGet: action=google-import  — returns recent email subjects, calendar
+ * doGet: action=google-import  â returns recent email subjects, calendar
  *   events, and Keep/Tasks items so the PWA can suggest tasks.
- * doPost: action=google-search — searches with a query string for more
+ * doPost: action=google-search â searches with a query string for more
  *   targeted results.
  */
 
@@ -769,7 +842,7 @@ function googleImport_(e) {
 /**
  * POST { action: "google-search", query, services }
  * Targeted search across Gmail / Calendar / Tasks for a specific query.
- * services: array like ["gmail","calendar","tasks"] — defaults to all.
+ * services: array like ["gmail","calendar","tasks"] â defaults to all.
  */
 function googleSearch_(body) {
   const query   = (body.query || "").trim();
@@ -860,7 +933,7 @@ function googleSearch_(body) {
 }
 
 
-// ── Reminders ─────────────────────────────────────────────────────
+// ââ Reminders âââââââââââââââââââââââââââââââââââââââââââââââââââââ
 function getReminders_() {
   try {
     const sheets = ensureSheets_();
@@ -906,7 +979,7 @@ function saveReminders_(body) {
 }
 
 /* =========================================================================
- * SMART DAILY DIGEST — AI-prioritized 5+2 task list per person
+ * SMART DAILY DIGEST â AI-prioritized 5+2 task list per person
  * Triggered daily at 8pm via time-based trigger AND callable via POST
  * action=daily-digest for on-demand generation in the PWA.
  * ========================================================================= */
@@ -983,63 +1056,62 @@ function handleDailyDigest_(body) {
  * Generates AI digest and emails EACH person their own list + a peek at the other's list.
  */
 function sendDailyDigestEmail() {
-  const loaded = loadAll_();
-  const settings = getSettings_();
-  const emails = settings.parentEmails || [];
-  const names = (settings.parentNames || ["Kelvin", "Enrique"]).slice(0, 2);
-
-  if (emails.length === 0) { Logger.log("No parentEmails configured; skipping daily digest."); return; }
-
-  const result = handleDailyDigest_({});
-  if (!result.ok) { Logger.log("Daily digest AI failed: " + result.error); return; }
-
-  const digest = result.digest;
-  const today = result.today;
-  const todayFormatted = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "EEEE, MMMM d");
-
-  // Send each person their personalized email
+  var settings = getSettings_();
+  var names    = (settings.parentNames || []).concat(settings.kidNames || []);
+  var emails   = settings.parentEmails || [];
+  var digestTimes = {};
+  try { digestTimes = JSON.parse(settings.digestTimes || "{}"); } catch(e) {}
+  var now         = new Date();
+  var currentHour = now.getHours();
+  var tz          = Session.getScriptTimeZone();
+  var todayStr    = Utilities.formatDate(now, tz, "yyyy-MM-dd");
+  var todayFmt    = Utilities.formatDate(now, tz, "MMMM d, yyyy");
+  var loaded = loadAll_();
   names.forEach(function(name, idx) {
-    const email = emails[idx];
+    var email = emails[idx] || "";
     if (!email) return;
-
-    const myList = digest[name] || { main: [], bonus: [] };
-    const otherName = names[1 - idx] || "";
-    const otherList = digest[otherName] || { main: [], bonus: [] };
-
-    const subject = "Your Family Ledger for " + todayFormatted + " — " + myList.main.length + " tasks";
-    const html = buildDailyDigestHtml_(name, myList, otherName, otherList, todayFormatted);
-    const text = buildDailyDigestText_(name, myList, otherName, otherList, todayFormatted);
-
+    var personTime = digestTimes[name] || settings.dailyDigestAt || "06:00";
+    var personHour = parseInt(personTime.split(":")[0], 10);
+    if (isNaN(personHour)) personHour = 6;
+    if (personHour !== currentHour) return;
+    var myTasks = loaded.tasks.filter(function(t) {
+      if (!isTaskAvailableToday_(t, todayStr)) return false;
+      if (!isVisibleTo_(t, name)) return false;
+      return true;
+    });
+    var subject = "Your Family Ledger for " + todayFmt + " - " + myTasks.length + " items";
+    var html    = buildPersonalDigestHtml_(name, myTasks, todayFmt);
+    var text    = buildPersonalDigestText_(name, myTasks, todayFmt);
     MailApp.sendEmail({ to: email, subject: subject, body: text, htmlBody: html, name: "The Family Ledger" });
   });
-
-  // Also apply any suggested deadline updates back to the sheet
-  const updates = result.deadlineUpdates || [];
-  if (updates.length > 0) {
-    let dirty = false;
-    updates.forEach(function(u) {
-      const task = loaded.tasks.find(function(t) { return t.id === u.id; });
-      if (task && !task.deadline && u.suggestedDeadline) {
-        task.deadline = u.suggestedDeadline;
-        task.lastModified = Date.now();
-        dirty = true;
-      }
-    });
-    if (dirty) saveAll_({ tasks: loaded.tasks });
-  }
-
-  sendPushToAll_({
-    title: "Today's task list is ready",
-    body: "Check your personalized Family Ledger for today.",
-    url: "/?view=today",
-    tag: "daily-digest",
+  sendPushToAll_({ title: "Today's task list is ready", body: "Check your personalized Family Ledger.", url: "/?view=today", tag: "daily-digest" });
+}
+function buildPersonalDigestHtml_(name, tasks, todayFmt) {
+  var rows = tasks.slice(0, 10).map(function(t) {
+    var dl = t.deadline ? ' <span style="color:#C9603C">(due ' + escapeHtml_(t.deadline) + ')</span>' : "";
+    return "<li style='margin:8px 0'><strong>" + escapeHtml_(t.title) + "</strong>" + dl +
+      " <span style='color:#8A8579;font-size:12px'>* " + escapeHtml_(t.taskFrequency || t.frequency || "") + "</span>" +
+      (t.details ? "<br><span style='color:#6B6B6B;font-size:12px'>" + escapeHtml_((t.details || "").substring(0, 120)) + "</span>" : "") + "</li>";
+  }).join("");
+  return '<div style="font-family:sans-serif;max-width:600px;margin:auto">' +
+    '<h1 style="color:#1B2C3A;font-size:22px">Good morning, ' + escapeHtml_(name) + '!</h1>' +
+    '<p>' + todayFmt + ' - ' + tasks.length + ' tasks today:</p>' +
+    '<ul style="padding-left:20px">' + rows + '</ul>' +
+    (tasks.length > 10 ? '<p style="color:#8A8579">...and ' + (tasks.length - 10) + ' more in the app.</p>' : "") +
+    '</div>';
+}
+function buildPersonalDigestText_(name, tasks, todayFmt) {
+  var out = ["Good morning, " + name + "!", "", todayFmt + " - your tasks:", ""];
+  tasks.forEach(function(t, i) {
+    out.push((i + 1) + ". " + t.title + (t.deadline ? " (due " + t.deadline + ")" : ""));
   });
+  return out.join("\n");
 }
 
 function buildDailyDigestHtml_(myName, myList, otherName, otherList, todayFormatted) {
   function taskRow(t, isBonus) {
     const prioColor = t.priority === "high" ? "#C9603C" : t.priority === "low" ? "#8A8579" : "#1B2C3A";
-    const dl = t.deadline ? ' <span style="color:#8A8579;font-size:12px">· due ' + formatDate_(t.deadline) + '</span>' : "";
+    const dl = t.deadline ? ' <span style="color:#8A8579;font-size:12px">Â· due ' + formatDate_(t.deadline) + '</span>' : "";
     const why = t.whyToday ? '<div style="font-size:12px;color:#6B6B6B;margin-top:2px;font-style:italic">' + escapeHtml_(t.whyToday) + '</div>' : "";
     const badge = isBonus ? ' <span style="background:#E5DFD3;color:#6B6B6B;font-size:10px;padding:1px 5px;border-radius:3px">bonus</span>' : "";
     return '<li style="margin:10px 0;padding:8px;background:#fff;border-radius:6px;border-left:3px solid ' + prioColor + '">' +
@@ -1071,12 +1143,12 @@ function buildDailyDigestHtml_(myName, myList, otherName, otherList, todayFormat
 function buildDailyDigestText_(myName, myList, otherName, otherList, todayFormatted) {
   const lines = ["Good morning, " + myName + "!", todayFormatted, "", "YOUR TASKS FOR TODAY:", ""];
   (myList.main || []).forEach(function(t, i) {
-    lines.push((i + 1) + ". " + t.title + (t.deadline ? " (due " + t.deadline + ")" : "") + (t.whyToday ? " — " + t.whyToday : ""));
+    lines.push((i + 1) + ". " + t.title + (t.deadline ? " (due " + t.deadline + ")" : "") + (t.whyToday ? " â " + t.whyToday : ""));
   });
   if ((myList.bonus || []).length > 0) {
     lines.push("", "BONUS TASKS (if you have time):");
     (myList.bonus || []).forEach(function(t) {
-      lines.push("• " + t.title);
+      lines.push("â¢ " + t.title);
     });
   }
   if ((otherList.main || []).length > 0) {
