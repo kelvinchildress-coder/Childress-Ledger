@@ -610,6 +610,17 @@ export default function FamilyLedger() {
           }
     }, [settings, tasks]);
 
+  // Auto-generate today's digest when navigating to the Today view
+  useEffect(() => {
+    if (view !== "today") return;
+    const todayStr = new Date().toISOString().slice(0, 10);
+    if (!digestDate || digestDate !== todayStr) {
+      if (!digestLoading && tasks.length > 0) {
+        generateDigest();
+      }
+    }
+  }, [view, digestDate, digestLoading, tasks.length, generateDigest]);
+
   const fetchReminders = useCallback(async () => {
     const bu = settings.backendUrl || ENV_BACKEND_URL;
     const ss = settings.sharedSecret;
