@@ -887,6 +887,24 @@ export default function FamilyLedger() {
     enabled: settings.aiEnabled && !!effectiveBackendUrl,
   };
 
+  // New-day in-app notification: once per calendar day, surface today's tasks.
+  useEffect(() => {
+    if (!identityReady || loading) return;
+    const todayStr = new Date().toISOString().slice(0, 10);
+    let last = null; try { last = localStorage.getItem("fl_last_day_seen"); } catch {}
+    if (last === todayStr) return;
+    const mine = (cappedThisWeek.shown || []).filter(t => !(t.completionHistory || []).includes(todayStr));
+    try { localStorage.setItem("fl_last_day_seen", todayStr); } catch {}
+    if (mine.length > 0) {
+      setNewDayBanner({ date: todayStr, count: mine.length, titles: mine.slice(0, 4).map(t => t.title) });
+      try {
+        if (settings.pushEnabled && typeof Notification !== "undefined" && Notification.permission === "granted") {
+          new Notification("Today's Family Ledger", { body: mine.length + " task" + (mine.length === 1 ? "" : "s") + " for you today", icon: "/icon-192.png" });
+        }
+      } catch {}
+    }
+  }, [identityReady, loading, cappedThisWeek, settings.pushEnabled]);
+
   if (loading || !identityReady) {
     return (
       <div style={styles.loadingShell}>
@@ -916,24 +934,6 @@ export default function FamilyLedger() {
       </div>
     );
   }
-
-  // New-day in-app notification: once per calendar day, surface today's tasks.
-  useEffect(() => {
-    if (!identityReady || loading) return;
-    const todayStr = new Date().toISOString().slice(0, 10);
-    let last = null; try { last = localStorage.getItem("fl_last_day_seen"); } catch {}
-    if (last === todayStr) return;
-    const mine = (cappedThisWeek.shown || []).filter(t => !(t.completionHistory || []).includes(todayStr));
-    try { localStorage.setItem("fl_last_day_seen", todayStr); } catch {}
-    if (mine.length > 0) {
-      setNewDayBanner({ date: todayStr, count: mine.length, titles: mine.slice(0, 4).map(t => t.title) });
-      try {
-        if (settings.pushEnabled && typeof Notification !== "undefined" && Notification.permission === "granted") {
-          new Notification("Today's Family Ledger", { body: mine.length + " task" + (mine.length === 1 ? "" : "s") + " for you today", icon: "/icon-192.png" });
-        }
-      } catch {}
-    }
-  }, [identityReady, loading, cappedThisWeek, settings.pushEnabled]);
 
   return (
     <div style={styles.shell}>
