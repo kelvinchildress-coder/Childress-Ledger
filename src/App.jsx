@@ -31,6 +31,26 @@ import {
   unsubscribeFromPush, getPushStatus,
 } from "./push.js";
 import {
+  isHolidayActive, isSuppressedByHoliday, filterHoliday,
+  startHoliday, endHoliday, catchUpTasks, dismissCatchUp, holidayDays,
+} from "./holiday.js";
+import {
+  loadNotesFromBackend, saveNotesToBackend, loadNotesLocal,
+  visibleNotes, makeNote, audienceLabel, VISIBILITY_EVERYONE,
+} from "./notes.js";
+import {
+  loadWhenPossibleFromBackend, saveWhenPossibleToBackend, loadWhenPossibleLocal,
+  makeWhenPossibleItem,
+} from "./whenPossible.js";
+import {
+  initGoogleAuth, isGoogleAuthConfigured, matchEmailToMember, googleSignOut, hasRoster, GOOGLE_CLIENT_ID,
+} from "./googleAuth.js";
+import {
+  loadSubsFromBackend, saveSubsToBackend, loadSubsLocal,
+  makeSub, subsDueSoon, benefitsToUse, nextSubDate, SUB_CADENCES,
+  monthlyBillTotal, markBenefitUsed, isBenefitUsedThisCycle, daysUntilNext,
+} from "./subscriptions.js";
+import {
   Check, Plus, Calendar, Mail, List, Home, Trash2, Edit2, X, Copy,
   AlertCircle, Users, Briefcase, Heart, DollarSign, Baby, Wrench,
   Sparkles, Filter, Flame, Zap, Clock, Download,
@@ -265,6 +285,7 @@ const DEFAULT_SETTINGS = {
   parentNames: ["Parent 1", "Parent 2"],
   kidNames: ["Kid 1"],
   parentEmails: ["", ""],
+  kidEmails: [""],
   backendUrl: "",
   sharedSecret: "",
   aiEnabled: true,
@@ -273,6 +294,9 @@ const DEFAULT_SETTINGS = {
   dailyDigestEnabled: false,
   dailyTaskLimit: 5,
   digestTimes: {},
+  googleClientId: "",
+  requireSSO: false,
+  holidayMode: { active: false, startedAt: null, categories: ["house-care"], catchUpSince: null },
 };
 function migrate(arr) {
   return (arr || []).map(t => {
@@ -417,6 +441,10 @@ export default function FamilyLedger() {
   const [celebration, setCelebration] = useState(null);
   const [updateReady, setUpdateReady] = useState(false);
   const [events, setEvents] = useState([]);
+  const [subs, setSubs] = useState([]);
+  const [notes, setNotes] = useState([]);
+  const [whenPossible, setWhenPossible] = useState([]);
+  const [newDayBanner, setNewDayBanner] = useState(null);
   const saveTimeoutRef = useRef(null);
   const remoteSnapshotRef = useRef(null);
 
@@ -586,7 +614,7 @@ export default function FamilyLedger() {
                   if (assignees.length === 0) assignees.push("Kelvin", "Enrique");
                   const result = await generateDailyDigest({
                             backendUrl: bu, sharedSecret: ss,
-                            tasks: tasks, assignees,
+                            tasks: filterHoliday(tasks, settings), assignees,
                   });
                   if (result.ok) {
                             setTodayDigest(result.digest);
@@ -648,6 +676,32 @@ export default function FamilyLedger() {
 
   // Load reminders on mount
   useEffect(() => { fetchReminders(); }, [fetchReminders]);
+
+  // ---- Subscriptions / Notes / When-Possible: load + save (synced) ----
+  const _bu = () => settings.backendUrl || ENV_BACKEND_URL;
+  const _ss = () => settings.sharedSecret || ENV_SHARED_SECRET;
+  const saveSubs = useCallback(async (next) => {
+    setSubs(next);
+    await saveSubsToBackend({ backendUrl: _bu(), sharedSecret: _ss(), subs: next });
+  }, [settings]);
+  const saveNotes = useCallback(async (next) => {
+    setNotes(next);
+    await saveNotesToBackend({ backendUrl: _bu(), sharedSecret: _ss(), notes: next });
+  }, [settings]);
+  const saveWhenPossible = useCallback(async (next) => {
+    setWhenPossible(next);
+    await saveWhenPossibleToBackend({ backendUrl: _bu(), sharedSecret: _ss(), items: next });
+  }, [settings]);
+  useEffect(() => {
+    setSubs(loadSubsLocal()); setNotes(loadNotesLocal()); setWhenPossible(loadWhenPossibleLocal());
+    const bu = settings.backendUrl || ENV_BACKEND_URL;
+    const ss = settings.sharedSecret || ENV_SHARED_SECRET;
+    (async () => {
+      try { setSubs(await loadSubsFromBackend({ backendUrl: bu, sharedSecret: ss })); } catch {}
+      try { setNotes(await loadNotesFromBackend({ backendUrl: bu, sharedSecret: ss })); } catch {}
+      try { setWhenPossible(await loadWhenPossibleFromBackend({ backendUrl: bu, sharedSecret: ss })); } catch {}
+    })();
+  }, [settings.backendUrl, settings.sharedSecret]);
 
 
   async function persistLocal(nextTasks) {
@@ -788,18 +842,19 @@ export default function FamilyLedger() {
     persist(stamped);
   }
 
-  const thisWeekTasks = useMemo(() => tasks
+  const thisWeekTasks = useMemo(() => filterHoliday(tasks
     .filter(isDueThisWeek)
-    .filter(t => isVisibleToUser(t, identity)),
-  [tasks, identity]);
+    .filter(t => isVisibleToUser(t, identity)), settings),
+  [tasks, identity, settings]);
   const dailyLimit = settings.dailyTaskLimit || 5;
   const weeklyLimit = dailyLimit * 7;
   const todayISO = toISO(new Date());
   const outstandingTasks = useMemo(() => tasks.filter(t => {
     if (isSnoozed(t)) return false;
     if (!isVisibleToUser(t, identity)) return false;
+    if (isSuppressedByHoliday(t, settings)) return false;
     return !isDueThisWeek(t);
-  }), [tasks, identity]);
+  }), [tasks, identity, settings]);
   // "To Do When Possible" list
   const anytimeTasks = useMemo(() => tasks.filter(t => {
     if (isSnoozed(t)) return false;
@@ -842,18 +897,43 @@ export default function FamilyLedger() {
   }
 
   if (!identity) {
+    const pickHandler = async (data) => { const id = makeIdentity(data); await saveIdentity(id); setIdentity(id); };
+    const skipHandler = async () => { const id = makeIdentity({ name: "Family", role: "parent" }); await saveIdentity(id); setIdentity(id); };
     return (
       <div style={styles.shell}>
         <FontStyles />
         <div style={styles.grain} />
-        <IdentityPicker
-          settings={settings}
-          onPick={async (data) => { const id = makeIdentity(data); await saveIdentity(id); setIdentity(id); }}
-          onSkip={async () => { const id = makeIdentity({ name: "Family", role: "parent" }); await saveIdentity(id); setIdentity(id); }}
-        />
+        {isGoogleAuthConfigured(settings) ? (
+          <SignInGate
+            settings={settings}
+            onIdentity={(id) => setIdentity(id)}
+            onManualPick={settings.requireSSO ? null : pickHandler}
+            onSkip={settings.requireSSO ? null : skipHandler}
+          />
+        ) : (
+          <IdentityPicker settings={settings} onPick={pickHandler} onSkip={skipHandler} />
+        )}
       </div>
     );
   }
+
+  // New-day in-app notification: once per calendar day, surface today's tasks.
+  useEffect(() => {
+    if (!identityReady || loading) return;
+    const todayStr = new Date().toISOString().slice(0, 10);
+    let last = null; try { last = localStorage.getItem("fl_last_day_seen"); } catch {}
+    if (last === todayStr) return;
+    const mine = (cappedThisWeek.shown || []).filter(t => !(t.completionHistory || []).includes(todayStr));
+    try { localStorage.setItem("fl_last_day_seen", todayStr); } catch {}
+    if (mine.length > 0) {
+      setNewDayBanner({ date: todayStr, count: mine.length, titles: mine.slice(0, 4).map(t => t.title) });
+      try {
+        if (settings.pushEnabled && typeof Notification !== "undefined" && Notification.permission === "granted") {
+          new Notification("Today's Family Ledger", { body: mine.length + " task" + (mine.length === 1 ? "" : "s") + " for you today", icon: "/icon-192.png" });
+        }
+      } catch {}
+    }
+  }, [identityReady, loading, cappedThisWeek, settings.pushEnabled]);
 
   return (
     <div style={styles.shell}>
@@ -871,6 +951,12 @@ export default function FamilyLedger() {
           identity={identity}
           onSearch={() => setSearchOpen(o => !o)}
         />
+
+        {newDayBanner && (
+          <NewDayBanner data={newDayBanner}
+            onClose={() => setNewDayBanner(null)}
+            onOpen={() => { setView("today"); setNewDayBanner(null); }} />
+        )}
 
         {updateReady && (
           <div style={styles.updateBanner}>
@@ -935,9 +1021,7 @@ export default function FamilyLedger() {
             assigneeOptions={assigneeOptions} aiCfg={aiCfg}
             allTasks={tasks} onDelete={editingTask ? deleteTask : undefined} />
         )}
-        {view === "email" && (
-          <EmailPreview tasks={thisWeekTasks} weekRange={getWeekRange()} settings={settings} />
-        )}
+        {/* Sunday Email now lives inside the Settings tab (see below). */}
         {view === "brainstorm" && (
           <BrainstormView
             household={{ parentNames: settings.parentNames, kidNames: settings.kidNames }}
@@ -954,24 +1038,23 @@ export default function FamilyLedger() {
           <InsightsView tasks={tasks} events={events} aiCfg={aiCfg} identity={identity} settings={settings} />
         )}
         {view === "settings" && (
+          <>
           <Settings settings={settings} onSave={persistSettings}
             identity={identity}
             onResetIdentity={async () => { await clearIdentity(); setIdentity(null); }}
             backendUrl={effectiveBackendUrl} sharedSecret={effectiveSharedSecret}
-            envBackendUrl={ENV_BACKEND_URL} 
+            envBackendUrl={ENV_BACKEND_URL}
               googleCtx={googleCtx}
               googleLoading={googleLoading}
               onFetchGoogle={fetchGoogleCtx}
               />
-        )}
-        {view === "calendar" && (
-          <div style={{ padding: "24px 16px" }}>
-            <h2 style={{ fontFamily: "Georgia, serif", fontSize: 26, marginBottom: 4 }}>Calendar</h2>
-            <p style={{ color: "#888", fontSize: 14, marginBottom: 16 }}>Tasks plotted by deadline. Click any task to edit.</p>
-            <CalendarView tasks={tasks} onEditTask={(t) => setEditingTask(t)} setView={setView} />
+          <div style={{ borderTop: "1px solid #E5DFD0", marginTop: 8 }}>
+            <EmailPreview tasks={thisWeekTasks} weekRange={getWeekRange()} settings={settings} />
           </div>
+          </>
         )}
         {view === "reminders" && (
+          <>
           <RemindersView
             remindersList={remindersList}
             onSaveReminders={saveReminders}
@@ -980,8 +1063,17 @@ export default function FamilyLedger() {
             onRefresh={fetchReminders}
             aiCfg={aiCfg}
           />
+          <SubscriptionsView subs={subs} onSave={saveSubs} currentUser={identity ? identity.name : ""} onAddTask={upsertTask} />
+          <div style={{ padding: "8px 16px 24px", borderTop: "1px solid #E5DFD0", marginTop: 16 }}>
+            <h2 style={{ fontFamily: "Georgia, serif", fontSize: 26, marginBottom: 4 }}>Calendar</h2>
+            <p style={{ color: "#888", fontSize: 14, marginBottom: 16 }}>Tasks plotted by deadline. Click any task to edit.</p>
+            <CalendarView tasks={tasks} onEditTask={(t) => setEditingTask(t)} setView={setView} />
+          </div>
+          </>
         )}
         {view === "today" && (
+              <>
+                <HolidayBanner settings={settings} tasks={tasks} onSave={persistSettings} />
                 <TodayView
                               digest={todayDigest}
                               digestLoading={digestLoading}
@@ -993,10 +1085,351 @@ export default function FamilyLedger() {
                               currentUser={identity ? identity.name : ""}
                               settings={settings}
                             />
+                <WhenPossibleView items={whenPossible} onSave={saveWhenPossible} currentUser={identity ? identity.name : ""} />
+                <NotesView notes={notes} onSave={saveNotes} identity={identity}
+                           household={[...(settings.parentNames||[]), ...(settings.kidNames||[])].filter(Boolean)} />
+              </>
               )}
       </div>
       {celebration && <Celebration data={celebration} />}
       {searchOpen && <SearchPalette tasks={tasks} onClose={() => setSearchOpen(false)} onEditTask={(t) => setEditingTask(t)} setView={setView} />}
+    </div>
+  );
+}
+
+
+/* ============ HOLIDAY MODE BANNER ============ */
+function HolidayBanner({ settings, tasks, onSave }) {
+  const active = isHolidayActive(settings);
+  const catchUp = catchUpTasks(tasks, settings);
+  if (!active && catchUp.length === 0) return null;
+  const days = holidayDays(settings);
+  if (active) {
+    return (
+      <div style={{ background:"#EAF2F0", border:"1px solid #B9D4CC", borderRadius:10, padding:"12px 14px", margin:"16px 16px 0", display:"flex", alignItems:"center", gap:10 }}>
+        <MapPin size={18} color="#3F6B5C" />
+        <div style={{ flex:1, fontSize:13, color:"#2F5346" }}>
+          <strong>Holiday Mode is on.</strong> Home (House Care) tasks are paused{days>0?` — day ${days} away`:""}. Everything else keeps going.
+        </div>
+        <button onClick={() => onSave({ ...settings, holidayMode: endHoliday(settings) })}
+          style={{ background:"#3F6B5C", color:"#fff", border:"none", borderRadius:6, padding:"6px 12px", fontSize:12, cursor:"pointer" }}>
+          We're home
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div style={{ background:"#FFF7E9", border:"1px solid #EBD9A8", borderRadius:10, padding:"12px 14px", margin:"16px 16px 0" }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
+        <Sun size={18} color="#B5832E" />
+        <strong style={{ fontSize:13, color:"#7A5B1E" }}>Welcome back — {catchUp.length} home task{catchUp.length===1?"":"s"} to catch up on</strong>
+        <button onClick={() => onSave({ ...settings, holidayMode: dismissCatchUp(settings) })}
+          style={{ marginLeft:"auto", background:"none", border:"none", color:"#B5832E", cursor:"pointer", fontSize:12 }}>Dismiss</button>
+      </div>
+      <ul style={{ margin:0, paddingLeft:20, fontSize:13, color:"#6B5A2E" }}>
+        {catchUp.slice(0,8).map(t => <li key={t.id}>{t.title}</li>)}
+      </ul>
+    </div>
+  );
+}
+
+/* ============ WHEN POSSIBLE (shared low-pressure list) ============ */
+function WhenPossibleView({ items, onSave, currentUser }) {
+  const [text, setText] = React.useState("");
+  const list = (items || []).slice().sort((a,b) => (a.done===b.done) ? new Date(b.ts)-new Date(a.ts) : (a.done?1:-1));
+  const add = () => {
+    const t = text.trim(); if (!t) return;
+    onSave([makeWhenPossibleItem({ text: t, createdBy: currentUser || "Someone" }), ...(items||[])]);
+    setText("");
+  };
+  const toggle = (id) => onSave((items||[]).map(i => i.id===id ? { ...i, done: !i.done, doneBy: !i.done ? (currentUser||"Someone") : null, doneTs: !i.done ? new Date().toISOString() : null } : i));
+  const del = (id) => onSave((items||[]).filter(i => i.id !== id));
+  return (
+    <div style={{ margin:"20px 16px", background:"#fff", border:"1px solid #E5DFD0", borderRadius:12, padding:16 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+        <ListChecks size={18} color="#4F5D5C" />
+        <h3 style={{ margin:0, fontFamily:"Georgia,serif", fontSize:18 }}>When Possible</h3>
+        <span style={{ fontSize:12, color:"#9B9B9B" }}>shared · no deadlines</span>
+      </div>
+      <div style={{ display:"flex", gap:8, marginBottom:12 }}>
+        <input value={text} onChange={e=>setText(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") add(); }}
+          placeholder="Something to do whenever there's time…"
+          style={{ flex:1, padding:"9px 11px", border:"1px solid #D9D2C4", borderRadius:8, fontSize:14 }} />
+        <button onClick={add} style={{ background:"#4F5D5C", color:"#fff", border:"none", borderRadius:8, padding:"0 14px", cursor:"pointer" }}><Plus size={16} /></button>
+      </div>
+      {list.length === 0 && <p style={{ color:"#9B9B9B", fontSize:13, margin:0 }}>Nothing here yet. Add the little "someday" things the family can pick up anytime.</p>}
+      {list.map(i => (
+        <div key={i.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 0", borderTop:"1px solid #F0EBDF" }}>
+          <button onClick={()=>toggle(i.id)} style={{ width:20, height:20, borderRadius:5, border:"1.5px solid "+(i.done?"#5C7A3F":"#C4BCA8"), background:i.done?"#5C7A3F":"#fff", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+            {i.done && <Check size={13} color="#fff" />}
+          </button>
+          <span style={{ flex:1, fontSize:14, color:i.done?"#A8A296":"#3A3A3A", textDecoration:i.done?"line-through":"none" }}>{i.text}</span>
+          <span style={{ fontSize:11, color:"#B0AA9C" }}>{i.done ? `done by ${i.doneBy||"?"}` : `by ${i.createdBy||"?"}`}</span>
+          <button onClick={()=>del(i.id)} style={{ background:"none", border:"none", color:"#C99", cursor:"pointer" }}><X size={14} /></button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ============ FAMILY NOTES (per-person visibility) ============ */
+function NotesView({ notes, onSave, identity, household }) {
+  const [text, setText] = React.useState("");
+  const [vis, setVis] = React.useState([VISIBILITY_EVERYONE]);
+  const members = household || [];
+  const mine = visibleNotes(notes, identity);
+  const toggleVis = (who) => {
+    if (who === VISIBILITY_EVERYONE) { setVis([VISIBILITY_EVERYONE]); return; }
+    setVis(prev => {
+      const base = prev.filter(v => v !== VISIBILITY_EVERYONE);
+      return base.includes(who) ? (base.filter(v=>v!==who).length ? base.filter(v=>v!==who) : [VISIBILITY_EVERYONE]) : [...base, who];
+    });
+  };
+  const add = () => {
+    const t = text.trim(); if (!t) return;
+    onSave([makeNote({ text:t, author: identity?.name || "Someone", authorId: identity?.id || null, visibility: vis }), ...(notes||[])]);
+    setText(""); setVis([VISIBILITY_EVERYONE]);
+  };
+  const del = (id) => onSave((notes||[]).filter(n => n.id !== id));
+  const chip = (label, selected, onClick) => (
+    <button onClick={onClick} style={{ padding:"4px 10px", borderRadius:14, fontSize:12, cursor:"pointer",
+      border:"1px solid "+(selected?"#7A4A6B":"#D9D2C4"), background:selected?"#7A4A6B":"#fff", color:selected?"#fff":"#6B6B6B" }}>{label}</button>
+  );
+  return (
+    <div style={{ margin:"20px 16px", background:"#fff", border:"1px solid #E5DFD0", borderRadius:12, padding:16 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+        <Edit2 size={17} color="#7A4A6B" />
+        <h3 style={{ margin:0, fontFamily:"Georgia,serif", fontSize:18 }}>Notes</h3>
+        <span style={{ fontSize:12, color:"#9B9B9B" }}>only chosen people see each note</span>
+      </div>
+      <textarea value={text} onChange={e=>setText(e.target.value)} rows={2} placeholder="Leave a note…"
+        style={{ width:"100%", boxSizing:"border-box", padding:"9px 11px", border:"1px solid #D9D2C4", borderRadius:8, fontSize:14, resize:"vertical" }} />
+      <div style={{ display:"flex", flexWrap:"wrap", gap:6, alignItems:"center", margin:"10px 0" }}>
+        <span style={{ fontSize:12, color:"#9B9B9B", marginRight:2 }}>Visible to:</span>
+        {chip("Everyone", vis.includes(VISIBILITY_EVERYONE), () => toggleVis(VISIBILITY_EVERYONE))}
+        {members.map(m => chip(m, vis.includes(m), () => toggleVis(m)))}
+        <button onClick={add} style={{ marginLeft:"auto", background:"#7A4A6B", color:"#fff", border:"none", borderRadius:8, padding:"7px 14px", fontSize:13, cursor:"pointer" }}>Add note</button>
+      </div>
+      {mine.length === 0 && <p style={{ color:"#9B9B9B", fontSize:13, margin:0 }}>No notes for you right now.</p>}
+      {mine.map(n => (
+        <div key={n.id} style={{ padding:"10px 0", borderTop:"1px solid #F0EBDF" }}>
+          <div style={{ fontSize:14, color:"#3A3A3A", whiteSpace:"pre-wrap" }}>{n.text}</div>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginTop:4, fontSize:11, color:"#B0AA9C" }}>
+            <span>{n.author}</span><span>·</span>
+            <span style={{ display:"inline-flex", alignItems:"center", gap:3 }}>
+              {n.visibility && n.visibility.includes(VISIBILITY_EVERYONE) ? <Eye size={11}/> : <Lock size={11}/>} {audienceLabel(n)}
+            </span>
+            {(identity?.id && n.authorId === identity.id) && (
+              <button onClick={()=>del(n.id)} style={{ marginLeft:"auto", background:"none", border:"none", color:"#C99", cursor:"pointer" }}><Trash2 size={13} /></button>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ============ SUBSCRIPTIONS & BENEFITS ============ */
+function SubscriptionsView({ subs, onSave, currentUser, onAddTask }) {
+  const [showForm, setShowForm] = React.useState(false);
+  const blank = { name:"", kind:"bill", amount:"", cadence:"monthly", anchorDate:new Date().toISOString().slice(0,10), account:"", notes:"" };
+  const [form, setForm] = React.useState(blank);
+  const list = subs || [];
+  const bills = list.filter(s => s.active !== false && s.kind === "bill");
+  const benefits = list.filter(s => s.active !== false && s.kind === "benefit");
+  const dueSoon = subsDueSoon(list, 10);
+  const toUse = benefitsToUse(list);
+  const monthly = monthlyBillTotal(list);
+  const upd = (k,v) => setForm(p => ({ ...p, [k]: v }));
+  const save = () => {
+    if (!form.name.trim()) return;
+    onSave([...(subs||[]), makeSub(form)]);
+    setForm(blank); setShowForm(false);
+  };
+  const del = (id) => onSave((subs||[]).filter(s => s.id !== id));
+  const useBenefit = (sub) => onSave((subs||[]).map(s => s.id===sub.id ? markBenefitUsed(s, currentUser) : s));
+  const remindBenefit = (sub) => onAddTask && onAddTask({
+    id: crypto.randomUUID(), title: `Use ${sub.name} benefit ($${sub.amount}) before it resets`,
+    details: (sub.account?`Card/Account: ${sub.account}\n`:"") + (sub.notes||""),
+    category:"finance", assignedTo:"Anyone", frequency:"once",
+    deadline: nextSubDate(sub).toISOString().slice(0,10), priority:"high", createdAt: new Date().toISOString(),
+  });
+  const cadLabel = (id) => (SUB_CADENCES.find(c=>c.id===id)||{}).label || id;
+  const fld = { width:"100%", boxSizing:"border-box", padding:"8px 10px", border:"1px solid #D9D2C4", borderRadius:7, fontSize:13, marginTop:4 };
+  return (
+    <div style={{ padding:"8px 16px 4px", borderTop:"1px solid #E5DFD0", marginTop:16 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4 }}>
+        <ReceiptText size={20} color="#5C7A3F" />
+        <h2 style={{ fontFamily:"Georgia,serif", fontSize:24, margin:0 }}>Subscriptions & Benefits</h2>
+      </div>
+      <p style={{ color:"#888", fontSize:13, margin:"0 0 12px" }}>
+        Recurring bills you pay and perks you earn — tracked so nothing renews unnoticed and no credit goes to waste.
+      </p>
+
+      <div style={{ display:"flex", gap:10, flexWrap:"wrap", marginBottom:14 }}>
+        <div style={{ flex:"1 1 140px", background:"#F4F7EE", border:"1px solid #D6E2C4", borderRadius:10, padding:"10px 12px" }}>
+          <div style={{ fontSize:11, color:"#5C7A3F", textTransform:"uppercase", letterSpacing:.5 }}>Monthly bills</div>
+          <div style={{ fontSize:22, fontFamily:"Georgia,serif", color:"#3F5330" }}>${monthly.toFixed(0)}</div>
+        </div>
+        <div style={{ flex:"1 1 140px", background:"#FBF1F5", border:"1px solid #E6C9D6", borderRadius:10, padding:"10px 12px" }}>
+          <div style={{ fontSize:11, color:"#7A4A6B", textTransform:"uppercase", letterSpacing:.5 }}>Perks to use</div>
+          <div style={{ fontSize:22, fontFamily:"Georgia,serif", color:"#7A4A6B" }}>{toUse.length}</div>
+        </div>
+      </div>
+
+      {toUse.length > 0 && (
+        <div style={{ background:"#FBF1F5", border:"1px solid #E6C9D6", borderRadius:10, padding:12, marginBottom:14 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:8 }}>
+            <Gift size={16} color="#7A4A6B" /><strong style={{ fontSize:13, color:"#7A4A6B" }}>Maximize — perks not used this cycle</strong>
+          </div>
+          {toUse.map(({sub,days}) => (
+            <div key={sub.id} style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 0", borderTop:"1px solid #F0DCE5" }}>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:14 }}>{sub.name} {sub.amount?`· $${sub.amount}`:""}</div>
+                <div style={{ fontSize:11, color:"#9B7E8C" }}>{sub.account? sub.account+" · ":""}resets in {days} day{days===1?"":"s"} ({cadLabel(sub.cadence)})</div>
+              </div>
+              <button onClick={()=>remindBenefit(sub)} style={{ background:"none", border:"1px solid #C9A9B8", color:"#7A4A6B", borderRadius:6, padding:"5px 9px", fontSize:12, cursor:"pointer" }}>Remind me</button>
+              <button onClick={()=>useBenefit(sub)} style={{ background:"#7A4A6B", color:"#fff", border:"none", borderRadius:6, padding:"5px 10px", fontSize:12, cursor:"pointer" }}>Mark used</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {dueSoon.length > 0 && (
+        <div style={{ background:"#FFF7E9", border:"1px solid #EBD9A8", borderRadius:10, padding:12, marginBottom:14 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:8 }}>
+            <Bell size={16} color="#B5832E" /><strong style={{ fontSize:13, color:"#7A5B1E" }}>Renewing soon</strong>
+          </div>
+          {dueSoon.map(({sub,days}) => (
+            <div key={sub.id} style={{ fontSize:13, padding:"4px 0", color:"#6B5A2E" }}>
+              {sub.name} — ${sub.amount} in {days} day{days===1?"":"s"} {sub.account?`(${sub.account})`:""}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <button onClick={()=>setShowForm(v=>!v)} style={{ background:"#5C7A3F", color:"#fff", border:"none", borderRadius:8, padding:"8px 14px", fontSize:13, cursor:"pointer", marginBottom:12 }}>
+        <Plus size={14} style={{ verticalAlign:"middle", marginRight:4 }} />{showForm?"Close":"Add subscription / benefit"}
+      </button>
+
+      {showForm && (
+        <div style={{ background:"#fff", border:"1px solid #E5DFD0", borderRadius:10, padding:14, marginBottom:14 }}>
+          <div style={{ display:"flex", gap:8, marginBottom:8 }}>
+            <button onClick={()=>upd("kind","bill")} style={{ flex:1, padding:"7px", borderRadius:7, border:"1px solid "+(form.kind==="bill"?"#5C7A3F":"#D9D2C4"), background:form.kind==="bill"?"#5C7A3F":"#fff", color:form.kind==="bill"?"#fff":"#6B6B6B", cursor:"pointer", fontSize:13 }}>Bill (money out)</button>
+            <button onClick={()=>upd("kind","benefit")} style={{ flex:1, padding:"7px", borderRadius:7, border:"1px solid "+(form.kind==="benefit"?"#7A4A6B":"#D9D2C4"), background:form.kind==="benefit"?"#7A4A6B":"#fff", color:form.kind==="benefit"?"#fff":"#6B6B6B", cursor:"pointer", fontSize:13 }}>Benefit (perk in)</button>
+          </div>
+          <label style={{ fontSize:12, color:"#6B6B6B" }}>Name<input value={form.name} onChange={e=>upd("name",e.target.value)} placeholder={form.kind==="benefit"?"e.g. Sapphire Reserve StubHub credit":"e.g. Netflix"} style={fld} /></label>
+          <div style={{ display:"flex", gap:8, marginTop:8 }}>
+            <label style={{ flex:1, fontSize:12, color:"#6B6B6B" }}>Amount ($)<input type="number" value={form.amount} onChange={e=>upd("amount",e.target.value)} style={fld} /></label>
+            <label style={{ flex:1, fontSize:12, color:"#6B6B6B" }}>Cadence<select value={form.cadence} onChange={e=>upd("cadence",e.target.value)} style={fld}>{SUB_CADENCES.map(c=><option key={c.id} value={c.id}>{c.label}</option>)}</select></label>
+          </div>
+          <div style={{ display:"flex", gap:8, marginTop:8 }}>
+            <label style={{ flex:1, fontSize:12, color:"#6B6B6B" }}>{form.kind==="benefit"?"Cycle start":"Next/last charge"}<input type="date" value={form.anchorDate} onChange={e=>upd("anchorDate",e.target.value)} style={fld} /></label>
+            <label style={{ flex:1, fontSize:12, color:"#6B6B6B" }}>Card / account<input value={form.account} onChange={e=>upd("account",e.target.value)} placeholder="Chase Sapphire Reserve" style={fld} /></label>
+          </div>
+          <label style={{ fontSize:12, color:"#6B6B6B", display:"block", marginTop:8 }}>Notes<input value={form.notes} onChange={e=>upd("notes",e.target.value)} placeholder="How to redeem, terms, links…" style={fld} /></label>
+          <button onClick={save} style={{ marginTop:12, background:"#C9603C", color:"#fff", border:"none", borderRadius:8, padding:"9px 16px", fontSize:13, cursor:"pointer" }}>Save</button>
+        </div>
+      )}
+
+      {benefits.length > 0 && <div style={{ fontSize:12, color:"#9B9B9B", textTransform:"uppercase", letterSpacing:.5, margin:"6px 0" }}>Benefits</div>}
+      {benefits.map(sub => {
+        const used = isBenefitUsedThisCycle(sub);
+        return (
+          <div key={sub.id} style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 0", borderTop:"1px solid #F0EBDF" }}>
+            <Gift size={15} color="#7A4A6B" />
+            <div style={{ flex:1 }}>
+              <div style={{ fontSize:14 }}>{sub.name} {sub.amount?`· $${sub.amount}`:""}</div>
+              <div style={{ fontSize:11, color:"#9B9B9B" }}>{cadLabel(sub.cadence)}{sub.account?` · ${sub.account}`:""} · {used?"✓ used this cycle":`resets in ${daysUntilNext(sub)}d`}</div>
+            </div>
+            {!used && <button onClick={()=>useBenefit(sub)} style={{ background:"#7A4A6B", color:"#fff", border:"none", borderRadius:6, padding:"5px 10px", fontSize:12, cursor:"pointer" }}>Mark used</button>}
+            <button onClick={()=>del(sub.id)} style={{ background:"none", border:"none", color:"#C99", cursor:"pointer" }}><Trash2 size={14} /></button>
+          </div>
+        );
+      })}
+
+      {bills.length > 0 && <div style={{ fontSize:12, color:"#9B9B9B", textTransform:"uppercase", letterSpacing:.5, margin:"12px 0 6px" }}>Bills</div>}
+      {bills.map(sub => (
+        <div key={sub.id} style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 0", borderTop:"1px solid #F0EBDF" }}>
+          <ReceiptText size={15} color="#5C7A3F" />
+          <div style={{ flex:1 }}>
+            <div style={{ fontSize:14 }}>{sub.name} · ${sub.amount}</div>
+            <div style={{ fontSize:11, color:"#9B9B9B" }}>{cadLabel(sub.cadence)}{sub.account?` · ${sub.account}`:""} · next in {daysUntilNext(sub)}d</div>
+          </div>
+          <button onClick={()=>del(sub.id)} style={{ background:"none", border:"none", color:"#C99", cursor:"pointer" }}><Trash2 size={14} /></button>
+        </div>
+      ))}
+      {list.length === 0 && <p style={{ color:"#9B9B9B", fontSize:13 }}>Nothing tracked yet. Add your streaming services, insurance, and card perks like the Sapphire Reserve credits.</p>}
+    </div>
+  );
+}
+
+/* NEW-DAY NOTIFICATION BANNER */
+function NewDayBanner({ data, onClose, onOpen }) {
+  return (
+    <div style={{ margin: "12px 16px 0", background: "#1B2C3A", color: "#fff", borderRadius: 12, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+      <Sun size={20} color="#F0C05A" />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontFamily: "Georgia,serif", fontSize: 16 }}>Good morning — {data.count} task{data.count === 1 ? "" : "s"} for you today</div>
+        <div style={{ fontSize: 12, color: "#B9C4CE", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {data.titles.join("  ·  ")}{data.count > data.titles.length ? "  …" : ""}
+        </div>
+      </div>
+      <button onClick={onOpen} style={{ background: "#C9603C", color: "#fff", border: "none", borderRadius: 8, padding: "7px 12px", fontSize: 13, cursor: "pointer", flexShrink: 0 }}>View</button>
+      <button onClick={onClose} style={{ background: "none", border: "none", color: "#9FB0BC", cursor: "pointer", flexShrink: 0 }}><X size={16} /></button>
+    </div>
+  );
+}
+
+/* GOOGLE SIGN-IN GATE */
+function SignInGate({ settings, onIdentity, onManualPick, onSkip }) {
+  const btnRef = React.useRef(null);
+  const [err, setErr] = React.useState(null);
+  const required = !!settings.requireSSO;
+  React.useEffect(() => {
+    if (!btnRef.current) return;
+    let cancelled = false;
+    initGoogleAuth({
+      clientId: settings.googleClientId || GOOGLE_CLIENT_ID,
+      element: btnRef.current,
+      settings,
+      onResult: async (r) => {
+        if (cancelled) return;
+        if (r.ok && r.profile) {
+          const base = makeIdentity({ name: r.profile.name, role: r.profile.role });
+          const id = { ...base, email: r.email };
+          await saveIdentity(id);
+          onIdentity(id);
+        } else {
+          setErr(r.error || "Sign-in failed. Make sure your email is added in Settings.");
+        }
+      },
+    }).then((res) => { if (!res.ok) setErr(res.error); });
+    return () => { cancelled = true; };
+  }, []);
+  return (
+    <div style={{ ...styles.container, maxWidth: 520, paddingTop: 80 }}>
+      <div style={styles.formCard}>
+        <div style={styles.eyebrow}>Welcome</div>
+        <h1 style={{ ...styles.title, fontSize: 34, marginBottom: 12 }}>
+          Sign in to the <span style={{ fontStyle: "italic", color: "#C9603C" }}>Family Ledger</span>
+        </h1>
+        <p style={{ color: "#6B6B6B", marginTop: 0 }}>
+          Use your Google account. We'll drop you into your own profile automatically.
+        </p>
+        <div ref={btnRef} style={{ marginTop: 20, display: "flex", justifyContent: "center" }} />
+        {err && (
+          <div style={{ marginTop: 16, background: "#FFF0EC", border: "1px solid #F0C4B8", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#C9603C" }}>
+            {err}
+          </div>
+        )}
+        {!required && (onManualPick || onSkip) && (
+          <div style={{ marginTop: 24, borderTop: "1px solid #E5DFD0", paddingTop: 16 }}>
+            <p style={{ fontSize: 12, color: "#9B9B9B", margin: "0 0 12px" }}>Or continue on this device without signing in:</p>
+            <IdentityPicker settings={settings} onPick={onManualPick || (()=>{})} onSkip={onSkip || (()=>{})} embedded />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1057,15 +1490,13 @@ function IdentityPicker({ settings, onPick, onSkip }) {
 function Header({ view, setView, weekRange, completedCount, totalCount, syncStatus, syncError, backendUrl, backendConfigured, identity, onSearch }) {
   const weekLabel = weekRange.start.toLocaleDateString(undefined, { month: "long", day: "numeric" }) + " - " + weekRange.end.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   const navItems = [
-    { id: "dashboard",  label: "This Week",    icon: Home },
-    { id: "all",        label: "All Tasks",    icon: List },
-    { id: "brainstorm", label: "Brainstorm",   icon: MessageCircle },
-    { id: "insights",   label: "Insights",     icon: Brain },
-    { id: "email",      label: "Sunday Email", icon: Mail },
-    { id: "settings",   label: "Settings",     icon: SettingsIcon },
-    { id: "calendar",   label: "Calendar",     icon: Calendar },
-    { id: "reminders",  label: "Reminders",   icon: Bell },
-    { id: "today",     label: "Today",     icon: Sun },
+    { id: "today",      label: "Today",      icon: Sun },
+    { id: "dashboard",  label: "This Week",  icon: Home },
+    { id: "all",        label: "All Tasks",  icon: List },
+    { id: "brainstorm", label: "Brainstorm", icon: MessageCircle },
+    { id: "insights",   label: "Insights",   icon: Brain },
+    { id: "reminders",  label: "Reminders",  icon: Bell },
+    { id: "settings",   label: "Settings",   icon: SettingsIcon },
   ];
   const pct = totalCount === 0 ? 0 : Math.round((completedCount / totalCount) * 100);
   return (
@@ -2418,13 +2849,52 @@ function Settings({ settings, onSave, identity, onResetIdentity, backendUrl, sha
           <label style={styles.label}>Kids</label>
           {draft.kidNames.map((name, i) => (
             <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-              <input value={name} onChange={(e) => updateKid(i, e.target.value)} style={{ ...styles.input, flex: 1 }} />
+              <input value={name} onChange={(e) => updateKid(i, e.target.value)} placeholder="Name" style={{ ...styles.input, flex: 1 }} />
+              <input type="email" value={(draft.kidEmails||[])[i]||""} onChange={(e) => { const next=[...(draft.kidEmails||[])]; next[i]=e.target.value; update("kidEmails", next); }} placeholder="email (for sign-in)" style={{ ...styles.input, flex: 1 }} />
               <button onClick={() => removeKid(i)} style={{ ...styles.iconBtn, color: "#A04848" }}><Trash2 size={14} /></button>
             </div>
           ))}
           <button onClick={addKid} style={styles.ghostBtn}><Plus size={14} /> Add kid</button>
         </div>
       </div>
+
+      <div style={{ ...styles.formCard, marginTop: 24 }}>
+        <h2 style={styles.sectionTitle}>Holiday Mode</h2>
+        <p style={{ color: "#6B6B6B", margin: "4px 0 16px" }}>
+          Pause home (House Care) tasks while the family is away. They drop out of Today, This Week, and notifications, then come back as a catch-up list when you return.
+        </p>
+        {(() => {
+          const active = !!(draft.holidayMode && draft.holidayMode.active);
+          return (
+            <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+              <button onClick={() => { const hm = active ? endHoliday(draft) : startHoliday(draft); update("holidayMode", hm); onSave({ ...draft, holidayMode: hm }); }}
+                style={{ background: active ? "#3F6B5C" : "#C9603C", color:"#fff", border:"none", borderRadius:8, padding:"10px 18px", fontSize:14, cursor:"pointer" }}>
+                {active ? "We're home — end Holiday Mode" : "Start Holiday Mode"}
+              </button>
+              <span style={{ fontSize:13, color: active ? "#3F6B5C" : "#8A8579" }}>{active ? "On — home tasks paused" : "Off"}</span>
+            </div>
+          );
+        })()}
+      </div>
+
+      <div style={{ ...styles.formCard, marginTop: 24 }}>
+        <h2 style={styles.sectionTitle}>Family sign-in (Google SSO)</h2>
+        <p style={{ color: "#6B6B6B", margin: "4px 0 16px" }}>
+          Let each family member sign in with Google. Their email (set above) maps them to the right profile automatically. Paste your OAuth <strong>Client ID</strong> (public — ends in .apps.googleusercontent.com). The client secret is not used here.
+        </p>
+        <Field label="Google OAuth Client ID">
+          <input value={draft.googleClientId || ""} onChange={(e) => update("googleClientId", e.target.value)}
+            placeholder="1234-abcd.apps.googleusercontent.com" style={styles.input} />
+        </Field>
+        <label style={{ display:"flex", alignItems:"center", gap:10, marginTop:14, cursor:"pointer" }}>
+          <input type="checkbox" checked={!!draft.requireSSO} onChange={(e) => update("requireSSO", e.target.checked)} />
+          <span style={{ fontSize:14 }}>Require sign-in (only allowlisted family emails can use the app)</span>
+        </label>
+        <p style={{ color:"#9B9B9B", fontSize:12, margin:"10px 0 0" }}>
+          Tip: in Google Cloud Console add this site to "Authorized JavaScript origins". Changes here save with the button below.
+        </p>
+      </div>
+
       <div style={{ ...styles.formCard, marginTop: 24 }}>
         <h2 style={styles.sectionTitle}>This device</h2>
         <p style={{ color: "#6B6B6B", margin: "4px 0 16px" }}>Used to attribute completions, streaks, and the leaderboard.</p>
