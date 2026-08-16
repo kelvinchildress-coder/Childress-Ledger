@@ -1430,18 +1430,26 @@ function SubscriptionsView({ subs, onSave, currentUser, onAddTask }) {
 /* ============ MORNING REPORT (welcome screen) ============ */
 function MorningReportOverlay({ report, loading, userName, config, onSaveConfig, onRegenerate, onClose }) {
   const [editing, setEditing] = React.useState(false);
-  const [draft, setDraft] = React.useState(config || defaultMorningConfig());
-  React.useEffect(() => { setDraft(config || defaultMorningConfig()); }, [config]);
+  const base0 = config || defaultMorningConfig();
+  const [newsText, setNewsText] = React.useState((base0.news || []).join(", "));
+  const [researchText, setResearchText] = React.useState((base0.research || []).join(", "));
+  const [bible, setBible] = React.useState(base0.bible !== false);
+  const [custom, setCustom] = React.useState(base0.custom || "");
+  React.useEffect(() => {
+    const b = config || defaultMorningConfig();
+    setNewsText((b.news || []).join(", "));
+    setResearchText((b.research || []).join(", "));
+    setBible(b.bible !== false);
+    setCustom(b.custom || "");
+  }, [config]);
   const today = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
   const fld = { width: "100%", boxSizing: "border-box", padding: "9px 11px", border: "1px solid #4a5a6a", background: "#12202c", color: "#EAF0F5", borderRadius: 8, fontSize: 14, marginTop: 4 };
-  const listInput = (label, key, ph) => (
-    <label style={{ display: "block", fontSize: 12, color: "#9fb4c6", marginTop: 10 }}>{label}
-      <input value={(draft[key] || []).join(", ")}
-        onChange={e => setDraft(d => ({ ...d, [key]: e.target.value.split(",").map(x => x.trim()).filter(Boolean) }))}
-        placeholder={ph} style={fld} />
-    </label>
-  );
-  const saveInterests = () => { onSaveConfig(draft); setEditing(false); onRegenerate(); };
+  const parseList = (str) => str.split(",").map(x => x.trim()).filter(Boolean);
+  const saveInterests = () => {
+    onSaveConfig({ news: parseList(newsText), research: parseList(researchText), bible: bible, custom: custom.trim() });
+    setEditing(false);
+    onRegenerate();
+  };
   const renderLinks = (obj, heading) => {
     const keys = Object.keys(obj || {}).filter(q => obj[q] && obj[q].length);
     if (!keys.length) return null;
@@ -1510,13 +1518,17 @@ function MorningReportOverlay({ report, loading, userName, config, onSaveConfig,
           {!loading && <button onClick={onRegenerate} style={{ marginLeft: 8, background: "none", border: "1px solid #4a5a6a", color: "#BFD4E6", borderRadius: 8, padding: "7px 12px", fontSize: 13, cursor: "pointer" }}>Refresh</button>}
           {editing && (
             <div style={{ marginTop: 14, background: "#12202c", border: "1px solid #33475a", borderRadius: 12, padding: 16 }}>
-              {listInput("News topics or places (comma-separated)", "news", "e.g. Austin, Malta, Nebraska football")}
-              {listInput("Research topics (comma-separated)", "research", "e.g. education, child psychology")}
+              <label style={{ display: "block", fontSize: 12, color: "#9fb4c6", marginTop: 10 }}>News topics or places (comma-separated)
+                <input value={newsText} onChange={e => setNewsText(e.target.value)} placeholder="e.g. Austin, Malta, Nebraska football" style={fld} />
+              </label>
+              <label style={{ display: "block", fontSize: 12, color: "#9fb4c6", marginTop: 10 }}>Research topics (comma-separated)
+                <input value={researchText} onChange={e => setResearchText(e.target.value)} placeholder="e.g. education, child psychology" style={fld} />
+              </label>
               <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, fontSize: 14, cursor: "pointer" }}>
-                <input type="checkbox" checked={draft.bible !== false} onChange={e => setDraft(d => ({ ...d, bible: e.target.checked }))} /> Include a daily Bible verse
+                <input type="checkbox" checked={bible} onChange={e => setBible(e.target.checked)} /> Include a daily Bible verse
               </label>
               <label style={{ display: "block", fontSize: 12, color: "#9fb4c6", marginTop: 12 }}>Anything else (custom request)
-                <textarea value={draft.custom || ""} onChange={e => setDraft(d => ({ ...d, custom: e.target.value }))} rows={2}
+                <textarea value={custom} onChange={e => setCustom(e.target.value)} rows={2}
                   placeholder="e.g. a motivational quote, a fun fact about space"
                   style={{ ...fld, resize: "vertical" }} />
               </label>
