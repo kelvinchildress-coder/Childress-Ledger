@@ -163,30 +163,69 @@ function isVisibleToUser(task, identity) {
   if (visibleTo.length > 0 && !visibleTo.includes(name)) return false;
   return true;
 }
+// Effective next-due date for a task. For recurring tasks whose stored
+// deadline is in the past (e.g. an annual birthday), roll it forward to the
+// next occurrence so it doesn't read as "overdue" or flood the weekly view.
+function effectiveDueDate(task) {
+  if (!task || !task.deadline) return null;
+  const freq = (task.taskFrequency || task.frequency || '').toLowerCase();
+  const today = startOfDay(new Date());
+  let d = startOfDay(task.deadline);
+  const recurring = ['weekly', 'biweekly', 'monthly', 'quarterly', 'annual', 'annually'].includes(freq);
+  if (d >= today || !recurring) return d;
+  const bump = (dt) => {
+    const n = new Date(dt);
+    if (freq === 'weekly') n.setDate(n.getDate() + 7);
+    else if (freq === 'biweekly') n.setDate(n.getDate() + 14);
+    else if (freq === 'monthly') n.setMonth(n.getMonth() + 1);
+    else if (freq === 'quarterly') n.setMonth(n.getMonth() + 3);
+    else n.setFullYear(n.getFullYear() + 1);
+    return n;
+  };
+  let guard = 0;
+  while (d < today && guard < 600) { d = bump(d); guard++; }
+  return d;
+}
+
+// Whole days from today until a task's effective due date (negative = overdue).
+function daysToDue(task) {
+  const eff = effectiveDueDate(task);
+  if (!eff) return null;
+  return Math.round((eff - startOfDay(new Date())) / 86400000);
+}
+
 function isDueThisWeek(task) {
   if (isSnoozed(task)) return false;
   if (!isInAvailabilityWindow(task)) return false;
   const freq = (task.taskFrequency || task.frequency || 'weekly').toLowerCase();
   const today = toISO(new Date());
   const todayDay = new Date().getDay();
-  if (freq === 'once' || freq === 'as-needed') {
-    if (!task.deadline) return true;
-    const d = daysUntil(task.deadline);
-    return d !== null && d <= 7 && d >= -1;
-  }
   if (freq === 'daily') { return !(task.completionHistory || []).includes(today); }
-  if (freq === 'weekly' || freq === 'biweekly') {
-    if ((task.repeatDays || []).length > 0) {
-      const hasCompletedToday = (task.completionHistory || []).includes(today);
-      if (hasCompletedToday) return false;
-      return task.repeatDays.includes(todayDay);
-    }
-    return true;
+  if ((freq === 'weekly' || freq === 'biweekly') && (task.repeatDays || []).length > 0) {
+    if ((task.completionHistory || []).includes(today)) return false;
+    return task.repeatDays.includes(todayDay);
   }
+  // A task with a real deadline is "this week" only if that (effective) date
+  // is within 7 days or already past. Far-off dated items go to Coming Up.
+  if (task.deadline) {
+    const d = daysToDue(task);
+    return d !== null && d <= 7;
+  }
+  // No deadline:
+  if (freq === 'once' || freq === 'as-needed') return true;
+  if (freq === 'weekly' || freq === 'biweekly') return true;
   if (!task.lastCompleted) return true;
   const freqEntry = TASK_FREQUENCIES.find(f => f.id === freq);
   if (!freqEntry || !freqEntry.days) return true;
   return Math.round((Date.now() - new Date(task.lastCompleted)) / 86400000) >= freqEntry.days * 0.85;
+}
+
+// "Coming up" = a dated task whose effective due date is 8-30 days out.
+function isComingUp(task) {
+  if (isSnoozed(task)) return false;
+  if (!task.deadline) return false;
+  const d = daysToDue(task);
+  return d !== null && d > 7 && d <= 30;
 }
 function calcStreak(task) {
   if (task.frequency === "once") return 0;
@@ -399,6 +438,31 @@ function CalendarView({ tasks, onEditTask, setView }) {
   const isToday = (d) => d === today.getDate() && yr === today.getFullYear() && mo === today.getMonth();
   return (
     <div style={{ maxWidth: 800, margin: "0 auto", padding: "16px 0" }}>
+      {(() => {
+        const up = tasks
+          .filter(t => t.deadline && daysToDue(t) !== null && daysToDue(t) >= 0 && daysToDue(t) <= 45)
+          .sort((a, b) => daysToDue(a) - daysToDue(b))
+          .slice(0, 12);
+        if (!up.length) return null;
+        return (
+          <div style={{ background: "#fff", border: "1px solid #E5DFD0", borderRadius: 10, padding: 14, marginBottom: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <Clock size={16} color="#C9603C" />
+              <h3 style={{ margin: 0, fontSize: 15, fontFamily: "Georgia,serif" }}>Upcoming deadlines</h3>
+            </div>
+            {up.map(t => {
+              const d = daysToDue(t); const eff = effectiveDueDate(t);
+              return (
+                <div key={t.id} onClick={() => onEditTask(t)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", borderTop: "1px solid #F0EBDF", cursor: "pointer" }}>
+                  <div style={{ minWidth: 78, fontSize: 12, fontWeight: 600, color: d <= 3 ? "#C9603C" : "#4F5D5C" }}>{d === 0 ? "Today" : d === 1 ? "Tomorrow" : "in " + d + " days"}</div>
+                  <div style={{ flex: 1, fontSize: 14, color: "#1B2C3A" }}>{t.title}</div>
+                  <div style={{ fontSize: 12, color: "#9B9B9B" }}>{eff ? eff.toLocaleDateString(undefined, { month: "short", day: "numeric" }) : ""}</div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
       <nav style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
         <button onClick={()=>{ if(mo===0){setMo(11);setYr(y=>y-1);}else setMo(m=>m-1); }} style={{ background:"none", border:"1px solid #ccc", borderRadius:6, padding:"4px 12px", cursor:"pointer" }}>{"<"}</button>
         <h3 style={{ margin:0, fontSize:18, fontWeight:600 }}>{monthName}</h3>
@@ -885,6 +949,10 @@ export default function FamilyLedger() {
     if (!isVisibleToUser(t, identity)) return false;
     return t.anytime === true;
   }), [tasks, identity]);
+  const comingUpTasks = useMemo(() => tasks
+    .filter(t => isVisibleToUser(t, identity) && !isSuppressedByHoliday(t, settings) && isComingUp(t))
+    .sort((a, b) => ((daysToDue(a) ?? 999) - (daysToDue(b) ?? 999))),
+  [tasks, identity, settings]);
 
   const cappedThisWeek = useMemo(() => {
     const done = thisWeekTasks.filter(t => (t.completionHistory || []).includes(todayISO));
@@ -1049,6 +1117,7 @@ export default function FamilyLedger() {
             tasks={cappedThisWeek.shown} allTasks={tasks}
             outstandingTasks={[...outstandingTasks, ...cappedThisWeek.overflow]}
             anytimeTasks={anytimeTasks}
+            comingUpTasks={comingUpTasks}
             onToggle={toggleComplete}
             onEdit={t => setEditingTask(t)}
             onAdd={() => { setEditingTask(null); setView('form'); }}
@@ -1824,11 +1893,32 @@ function QuickEditPanel({ task, onSave, onClose, assigneeOptions }) {
   );
 }
 
-function Dashboard({ tasks, allTasks, outstandingTasks, anytimeTasks, onToggle, onEdit, onAdd, onQuickAdd, onSnooze, onDelete, onExportICS, groupBy, setGroupBy, assigneeOptions, events, identity, aiCfg, categories, frequencies }) {
+function ComingUpList({ items, onEdit, onQuickEdit, onToggle, onSnooze, onDelete }) {
+  const list = [...(items || [])].sort((a, b) => ((daysToDue(a) ?? 999) - (daysToDue(b) ?? 999)));
+  return (
+    <div style={styles.taskGrid}>
+      {list.map(t => {
+        const d = daysToDue(t);
+        const eff = effectiveDueDate(t);
+        const label = d === 0 ? "Today" : d === 1 ? "Tomorrow" : "in " + d + " days";
+        return (
+          <div key={t.id}>
+            <div style={{ display:"inline-flex", alignItems:"center", gap:6, background:"#33475a", color:"#fff", fontSize:11, borderRadius:12, padding:"3px 10px", marginBottom:6 }}>
+              <Clock size={11} /> {label}{eff ? " · " + eff.toLocaleDateString(undefined, { month:"short", day:"numeric" }) : ""}
+            </div>
+            <TaskCard task={t} onToggle={() => onToggle(t.id)} onEdit={() => onEdit(t)} onQuickEdit={() => onQuickEdit(t)} onSnooze={dd => onSnooze(t.id, dd)} onDelete={onDelete ? () => onDelete(t.id) : undefined} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Dashboard({ tasks, allTasks, outstandingTasks, anytimeTasks, comingUpTasks, onToggle, onEdit, onAdd, onQuickAdd, onSnooze, onDelete, onExportICS, groupBy, setGroupBy, assigneeOptions, events, identity, aiCfg, categories, frequencies }) {
   const [activeTab, setActiveTab] = React.useState("week");
   const [sortBy, setSortBy] = React.useState("category");
   const [quickEditTask, setQuickEditTask] = React.useState(null);
-  const displayTasks = activeTab === "anytime" ? (anytimeTasks || []) : activeTab === "outstanding" ? (outstandingTasks || []) : (tasks || []);
+  const displayTasks = activeTab === "anytime" ? (anytimeTasks || []) : activeTab === "outstanding" ? (outstandingTasks || []) : activeTab === "comingup" ? (comingUpTasks || []) : (tasks || []);
   const outstanding = outstandingTasks || [];
   const grouped = useMemo(() => {
     let sorted = [...displayTasks];
@@ -1850,7 +1940,7 @@ function Dashboard({ tasks, allTasks, outstandingTasks, anytimeTasks, onToggle, 
     return Object.keys(g).map(k => ({ key: k, items: g[k] }));
   }, [displayTasks, sortBy]);
   const groupOrder = grouped.map(g => g.key);
-  if (tasks.length === 0 && activeTab !== "week") {
+  if (tasks.length === 0 && activeTab === "week") {
     return (
       <>
         <QuickAdd onAdd={onQuickAdd} assigneeOptions={assigneeOptions} events={events} aiCfg={aiCfg} categories={categories} frequencies={frequencies} />
@@ -1871,6 +1961,7 @@ function Dashboard({ tasks, allTasks, outstandingTasks, anytimeTasks, onToggle, 
       <div style={styles.sectionHeader}>
         <div style={{ display:"flex", gap:0, borderRadius:6, overflow:"hidden", border:"1.5px solid #D0CBB8" }}>
           <button onClick={() => setActiveTab("week")} style={{ ...styles.toggleBtn, borderRadius:0, borderRight:"1px solid #D0CBB8", ...(activeTab==="week" ? styles.toggleBtnActive : {}) }}>This Week ({tasks.length})</button>
+          <button onClick={() => setActiveTab("comingup")} style={{ ...styles.toggleBtn, borderRadius:0, borderRight:"1px solid #D0CBB8", ...(activeTab==="comingup" ? styles.toggleBtnActive : {}) }}>Coming Up {(comingUpTasks||[]).length > 0 ? `(${comingUpTasks.length})` : ""}</button>
           <button onClick={() => setActiveTab("outstanding")} style={{ ...styles.toggleBtn, borderRadius:0, borderRight:"1px solid #D0CBB8", ...(activeTab==="outstanding" ? styles.toggleBtnActive : {}) }}>Outstanding {outstanding.length > 0 ? `(${outstanding.length})` : ""}</button>
           <button onClick={() => setActiveTab("anytime")} style={{ ...styles.toggleBtn, borderRadius:0, ...(activeTab==="anytime" ? styles.toggleBtnActive : {}) }}>Anytime {anytimeTasks.length > 0 ? `(${anytimeTasks.length})` : ""}</button>
         </div>
@@ -1891,7 +1982,16 @@ function Dashboard({ tasks, allTasks, outstandingTasks, anytimeTasks, onToggle, 
           {anytimeTasks.length === 0 && <p style={{ color:"#9B9B9B", margin:"8px 0 0", fontSize:13 }}>No tasks marked as "Anytime" yet. Edit any task and check "Add to Anytime list" to add it here.</p>}
         </div>
       )}
-      {sortBy === "deadline" ? (
+      {activeTab === "comingup" && (
+        <div style={{ background:"#EEF2F7", border:"1px solid #C7D4E0", borderRadius:8, padding:"12px 16px", marginBottom:12 }}>
+          <strong style={{ color:"#33475a" }}>Coming up — start prepping</strong>
+          <span style={{ color:"#6B6B6B", marginLeft:8, fontSize:13 }}>Bigger items due in the next 30 days, with a countdown, so you can get ahead. Not urgent this week.</span>
+          {(comingUpTasks||[]).length === 0 && <p style={{ color:"#9B9B9B", margin:"8px 0 0", fontSize:13 }}>Nothing on the 30-day horizon right now.</p>}
+        </div>
+      )}
+      {activeTab === "comingup" ? (
+        <ComingUpList items={comingUpTasks} onEdit={onEdit} onQuickEdit={setQuickEditTask} onToggle={onToggle} onSnooze={onSnooze} onDelete={onDelete} />
+      ) : sortBy === "deadline" ? (
         <div style={styles.taskGrid}>
           {(grouped[0]?.items || []).map(t => (
             <TaskCard key={t.id} task={t} onToggle={() => onToggle(t.id)} onEdit={() => onEdit(t)} onQuickEdit={() => setQuickEditTask(t)} onSnooze={d => onSnooze(t.id, d)} onDelete={onDelete ? () => onDelete(t.id) : undefined} />
@@ -2208,15 +2308,29 @@ function QuickAdd({ onAdd, assigneeOptions, events, aiCfg, categories, frequenci
 /* ALL TASKS */
 function AllTasks({ tasks, allTasks, onEdit, onDelete, onAdd, onUnsnooze, onExportICS, filterCategory, setFilterCategory, filterAssignee, setFilterAssignee, assigneeOptions }) {
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [openCats, setOpenCats] = useState({});
+  const toggleCat = (id) => setOpenCats(o => ({ ...o, [id]: !o[id] }));
+  const groups = useMemo(() => {
+    const g = {};
+    tasks.forEach(t => { const k = t.category || "other"; (g[k] = g[k] || []).push(t); });
+    const order = CATEGORIES.map(c => c.id).filter(id => g[id]);
+    Object.keys(g).forEach(k => { if (!order.includes(k)) order.push(k); });
+    return order.map(k => ({ id: k, items: g[k] }));
+  }, [tasks]);
+  const dueSoon = (t) => isDueThisWeek(t) || isComingUp(t);
+  const freqLabel = (t) => (FREQUENCIES.find(f => f.id === t.frequency) || {}).label || "";
   return (
     <div>
       <div style={styles.sectionHeader}>
         <h2 style={styles.sectionTitle}>Every task ({tasks.length}{tasks.length !== allTasks.length ? ` of ${allTasks.length}` : ""})</h2>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button style={styles.ghostBtn} onClick={onExportICS}><Download size={14} /> Export all (.ics)</button>
+          <button style={styles.ghostBtn} onClick={() => setOpenCats(Object.fromEntries(groups.map(g => [g.id, true])))}>Expand all</button>
+          <button style={styles.ghostBtn} onClick={() => setOpenCats({})}>Collapse all</button>
+          <button style={styles.ghostBtn} onClick={onExportICS}><Download size={14} /> Export</button>
           <button style={styles.primaryBtn} onClick={onAdd}><Plus size={16} /> Add task</button>
         </div>
       </div>
+      <p style={{ color: "#8A8579", fontSize: 13, margin: "0 0 12px" }}>Every category's full master list. Tap a category to open it and confirm nothing is missing.</p>
       <div style={styles.filterBar}>
         <div style={styles.filterGroup}>
           <Filter size={13} color="#6B6B6B" />
@@ -2234,81 +2348,50 @@ function AllTasks({ tasks, allTasks, onEdit, onDelete, onAdd, onUnsnooze, onExpo
           </select>
         </div>
       </div>
-      <div style={{ overflowX: "auto" }}>
-        <table style={styles.table}>
-          <thead>
-            <tr style={styles.tableHeadRow}>
-              <th style={styles.th}>Task</th>
-              <th style={styles.th}>Category</th>
-              <th style={styles.th}>Assigned</th>
-              <th style={styles.th}>Frequency</th>
-              <th style={styles.th}>Deadline</th>
-              <th style={styles.th}>Priority</th>
-              <th style={styles.th}>Streak</th>
-              <th style={styles.th}>Status</th>
-              <th style={styles.th}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {tasks.map(t => {
-              const cat = CATEGORIES.find(c => c.id === t.category);
-              const freq = FREQUENCIES.find(f => f.id === t.frequency);
-              const streak = calcStreak(t);
-              const snoozed = isSnoozed(t);
-              return (
-                <tr key={t.id} style={styles.tableRow}>
-                  <td style={styles.td}>
-                    <div style={{ fontWeight: 500, color: "#1B2C3A" }}>{t.title}</div>
-                    {t.details && (
-                      <div style={{ fontSize: 12, color: "#8A8579", marginTop: 2 }}>
-                        {renderDetails(t.details.length > 120 ? t.details.slice(0, 120) + "..." : t.details)}
+      {groups.length === 0 && <p style={{ color: "#9B9B9B" }}>No tasks match these filters.</p>}
+      {groups.map(({ id, items }) => {
+        const meta = CATEGORIES.find(c => c.id === id) || { label: id.replace(/-/g, " "), color: "#6B6B6B" };
+        const soon = items.filter(dueSoon).length;
+        const open = !!openCats[id] || groups.length === 1;
+        return (
+          <section key={id} style={{ border: "1px solid #E5DFD0", borderRadius: 10, marginBottom: 10, overflow: "hidden", background: "#fff" }}>
+            <button onClick={() => toggleCat(id)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", background: "none", border: "none", cursor: "pointer", textAlign: "left" }}>
+              <ChevronDown size={16} style={{ transform: open ? "none" : "rotate(-90deg)", transition: "transform .15s", color: "#8A8579", flexShrink: 0 }} />
+              <span style={{ width: 9, height: 9, borderRadius: 9, background: meta.color, flexShrink: 0 }} />
+              <span style={{ fontFamily: "Georgia,serif", fontSize: 16, flex: 1 }}>{meta.label}</span>
+              <span style={{ fontSize: 12, color: soon ? "#C9603C" : "#9B9B9B" }}>{soon} due soon</span>
+              <span style={{ fontSize: 12, color: "#9B9B9B", minWidth: 56, textAlign: "right" }}>{items.length} total</span>
+            </button>
+            {open && (
+              <div style={{ borderTop: "1px solid #F0EBDF" }}>
+                {items.map(t => {
+                  const d = daysToDue(t);
+                  const snoozed = isSnoozed(t);
+                  return (
+                    <div key={t.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "10px 14px", borderTop: "1px solid #F5F1E8" }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 500, color: "#1B2C3A" }}>{t.title}</div>
+                        <div style={{ fontSize: 12, color: "#8A8579", marginTop: 2, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <span>{t.assignedTo}</span>
+                          {freqLabel(t) && <span>&middot; {freqLabel(t)}</span>}
+                          {t.deadline && <span>&middot; {d !== null && d < 0 ? `overdue ${Math.abs(d)}d` : d === 0 ? "due today" : (d !== null && d <= 30 ? `in ${d}d` : formatDate(t.deadline))}</span>}
+                          {t.priority === "high" && <span style={{ color: "#C9603C" }}>&middot; priority</span>}
+                          {snoozed && <span>&middot; snoozed</span>}
+                        </div>
                       </div>
-                    )}
-                  </td>
-                  <td style={styles.td}>
-                    <span style={{ ...styles.categoryPill, borderColor: cat && cat.color, color: cat && cat.color }}>{cat && cat.label}</span>
-                  </td>
-                  <td style={styles.td}>{t.assignedTo}</td>
-                  <td style={styles.td}>{freq && freq.label}</td>
-                  <td style={styles.td}>{formatDate(t.deadline) || "--"}</td>
-                  <td style={styles.td}>
-                    <span style={{ ...styles.priorityPill,
-                      ...(t.priority === "high" ? styles.priorityPillHigh : {}),
-                      ...(t.priority === "low" ? styles.priorityPillLow : {}),
-                    }}>{t.priority}</span>
-                  </td>
-                  <td style={styles.td}>
-                    {streak >= 2 ? <StreakBadge streak={streak} muted /> : <span style={{ color: "#C9C2B5" }}>--</span>}
-                  </td>
-                  <td style={styles.td}>
-                    {snoozed ? (
-                      <button style={styles.snoozedPill} onClick={() => onUnsnooze(t.id)} title="Unsnooze">
-                        <Clock size={11} /> snoozed · {formatDate(t.snoozedUntil)}
-                      </button>
-                    ) : (<span style={{ color: "#C9C2B5" }}>active</span>)}
-                  </td>
-                  <td style={styles.td}>
-                    <div style={{ display: "flex", gap: 4 }}>
                       <button style={styles.iconBtn} onClick={() => onEdit(t)}><Edit2 size={13} /></button>
-                      <button style={{ ...styles.iconBtn, color: "#A04848" }}
-                        onClick={() => setConfirmDeleteId(t.id)} style={{ ...(confirmDeleteId === t.id ? { color: "#A04848", fontWeight: 700 } : {}) }}>
-                        <Trash2 size={13} />
-                      </button>
+                      <button style={{ ...styles.iconBtn, color: "#A04848" }} onClick={() => setConfirmDeleteId(confirmDeleteId === t.id ? null : t.id)}><Trash2 size={13} /></button>
+                      {confirmDeleteId === t.id && (
+                        <button style={{ fontSize: 11, padding: "3px 8px", background: "#A04848", color: "#fff", border: "none", borderRadius: 3, cursor: "pointer", flexShrink: 0 }} onClick={() => { onDelete(t.id); setConfirmDeleteId(null); }}>Delete</button>
+                      )}
                     </div>
-                    {confirmDeleteId === t.id && (
-                      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
-                        <span style={{ fontSize: 12, color: "#A04848" }}>Delete this task?</span>
-                        <button style={{ fontSize: 11, padding: "2px 8px", background: "#A04848", color: "#fff", border: "none", borderRadius: 3, cursor: "pointer" }} onClick={() => { onDelete(t.id); setConfirmDeleteId(null); }}>Yes, delete</button>
-                        <button style={{ fontSize: 11, padding: "2px 8px", background: "transparent", border: "1px solid #D9D2C4", borderRadius: 3, cursor: "pointer" }} onClick={() => setConfirmDeleteId(null)}>Cancel</button>
-                      </div>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        );
+      })}
     </div>
   );
 }
