@@ -51,6 +51,10 @@ import {
   monthlyBillTotal, markBenefitUsed, isBenefitUsedThisCycle, daysUntilNext,
 } from "./subscriptions.js";
 import {
+  loadMorningConfigs, saveMorningConfigs, configFor, defaultMorningConfig, hasInterests,
+  cachedReport, cacheReport, seenToday, markSeen, fetchMorningReport,
+} from "./morning.js";
+import {
   Check, Plus, Calendar, Mail, List, Home, Trash2, Edit2, X, Copy,
   AlertCircle, Users, Briefcase, Heart, DollarSign, Baby, Wrench,
   Sparkles, Filter, Flame, Zap, Clock, Download,
@@ -445,6 +449,12 @@ export default function FamilyLedger() {
   const [notes, setNotes] = useState([]);
   const [whenPossible, setWhenPossible] = useState([]);
   const [newDayBanner, setNewDayBanner] = useState(null);
+  const [morningConfigs, setMorningConfigs] = useState({});
+  const [morningConfigsLoaded, setMorningConfigsLoaded] = useState(false);
+  const [morningReport, setMorningReport] = useState(null);
+  const [morningLoading, setMorningLoading] = useState(false);
+  const [showMorning, setShowMorning] = useState(false);
+  const morningShownRef = useRef(false);
   const saveTimeoutRef = useRef(null);
   const remoteSnapshotRef = useRef(null);
 
@@ -692,6 +702,18 @@ export default function FamilyLedger() {
     setWhenPossible(next);
     await saveWhenPossibleToBackend({ backendUrl: _bu(), sharedSecret: _ss(), items: next });
   }, [settings]);
+  const regenerateMorning = useCallback(async () => {
+    if (!identity) return;
+    const user = identity.name || "Family";
+    const today = new Date().toISOString().slice(0, 10);
+    const bu = settings.backendUrl || ENV_BACKEND_URL, ss = settings.sharedSecret || ENV_SHARED_SECRET;
+    if (!bu) { setMorningReport({ date: today, greeting: "Good morning, " + user, brief: "", verse: null, needsBackend: true }); return; }
+    setMorningLoading(true);
+    const r = await fetchMorningReport({ backendUrl: bu, sharedSecret: ss, config: configFor(morningConfigs, user), userName: user });
+    if (r.ok) { setMorningReport(r.report); cacheReport(user, r.report); }
+    else setMorningReport({ date: today, greeting: "Good morning, " + user, brief: "", verse: null, error: r.error });
+    setMorningLoading(false);
+  }, [identity, settings, morningConfigs]);
   useEffect(() => {
     setSubs(loadSubsLocal()); setNotes(loadNotesLocal()); setWhenPossible(loadWhenPossibleLocal());
     const bu = settings.backendUrl || ENV_BACKEND_URL;
@@ -700,6 +722,8 @@ export default function FamilyLedger() {
       try { setSubs(await loadSubsFromBackend({ backendUrl: bu, sharedSecret: ss })); } catch {}
       try { setNotes(await loadNotesFromBackend({ backendUrl: bu, sharedSecret: ss })); } catch {}
       try { setWhenPossible(await loadWhenPossibleFromBackend({ backendUrl: bu, sharedSecret: ss })); } catch {}
+      try { setMorningConfigs(await loadMorningConfigs({ backendUrl: bu, sharedSecret: ss })); } catch {}
+      setMorningConfigsLoaded(true);
     })();
   }, [settings.backendUrl, settings.sharedSecret]);
 
@@ -905,6 +929,29 @@ export default function FamilyLedger() {
     }
   }, [identityReady, loading, cappedThisWeek, settings.pushEnabled]);
 
+  // Morning report: full-screen welcome on the first open each day.
+  useEffect(() => {
+    if (!identityReady || loading || !identity || !morningConfigsLoaded) return;
+    if (morningShownRef.current) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const user = identity.name || "Family";
+    if (seenToday(user, today)) return;
+    morningShownRef.current = true;
+    setShowMorning(true);
+    const cached = cachedReport(user, today);
+    if (cached) { setMorningReport(cached); return; }
+    const bu = settings.backendUrl || ENV_BACKEND_URL;
+    const ss = settings.sharedSecret || ENV_SHARED_SECRET;
+    if (!bu) { setMorningReport({ date: today, greeting: "Good morning, " + user, brief: "", verse: null, needsBackend: true }); return; }
+    setMorningLoading(true);
+    fetchMorningReport({ backendUrl: bu, sharedSecret: ss, config: configFor(morningConfigs, user), userName: user })
+      .then(r => {
+        if (r.ok) { setMorningReport(r.report); cacheReport(user, r.report); }
+        else setMorningReport({ date: today, greeting: "Good morning, " + user, brief: "", verse: null, error: r.error });
+      })
+      .finally(() => setMorningLoading(false));
+  }, [identityReady, loading, identity, morningConfigsLoaded, morningConfigs, settings.backendUrl, settings.sharedSecret]);
+
   if (loading || !identityReady) {
     return (
       <div style={styles.loadingShell}>
@@ -940,6 +987,17 @@ export default function FamilyLedger() {
       <FontStyles />
       <KeyframeStyles />
       <div style={styles.grain} />
+      {showMorning && (
+        <MorningReportOverlay
+          report={morningReport}
+          loading={morningLoading}
+          userName={identity ? identity.name : "Family"}
+          config={configFor(morningConfigs, identity ? identity.name : "Family")}
+          onSaveConfig={(cfg) => { const user = identity ? identity.name : "Family"; const next = { ...morningConfigs, [user]: cfg }; setMorningConfigs(next); saveMorningConfigs({ backendUrl: settings.backendUrl || ENV_BACKEND_URL, sharedSecret: settings.sharedSecret || ENV_SHARED_SECRET, configs: next }); }}
+          onRegenerate={regenerateMorning}
+          onClose={() => { const user = identity ? identity.name : "Family"; markSeen(user, new Date().toISOString().slice(0, 10)); setShowMorning(false); }}
+        />
+      )}
       <div style={styles.container}>
         <Header
           view={view} setView={setView}
@@ -1073,6 +1131,11 @@ export default function FamilyLedger() {
         )}
         {view === "today" && (
               <>
+                <div style={{ padding: "12px 16px 0" }}>
+                  <button onClick={() => setShowMorning(true)} style={{ background:"#1B2C3A", color:"#fff", border:"none", borderRadius:8, padding:"8px 14px", fontSize:13, cursor:"pointer", display:"inline-flex", alignItems:"center", gap:6 }}>
+                    <Sun size={15} /> My morning report
+                  </button>
+                </div>
                 <HolidayBanner settings={settings} tasks={tasks} onSave={persistSettings} />
                 <TodayView
                               digest={todayDigest}
@@ -1360,6 +1423,112 @@ function SubscriptionsView({ subs, onSave, currentUser, onAddTask }) {
         </div>
       ))}
       {list.length === 0 && <p style={{ color:"#9B9B9B", fontSize:13 }}>Nothing tracked yet. Add your streaming services, insurance, and card perks like the Sapphire Reserve credits.</p>}
+    </div>
+  );
+}
+
+/* ============ MORNING REPORT (welcome screen) ============ */
+function MorningReportOverlay({ report, loading, userName, config, onSaveConfig, onRegenerate, onClose }) {
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState(config || defaultMorningConfig());
+  React.useEffect(() => { setDraft(config || defaultMorningConfig()); }, [config]);
+  const today = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+  const fld = { width: "100%", boxSizing: "border-box", padding: "9px 11px", border: "1px solid #4a5a6a", background: "#12202c", color: "#EAF0F5", borderRadius: 8, fontSize: 14, marginTop: 4 };
+  const listInput = (label, key, ph) => (
+    <label style={{ display: "block", fontSize: 12, color: "#9fb4c6", marginTop: 10 }}>{label}
+      <input value={(draft[key] || []).join(", ")}
+        onChange={e => setDraft(d => ({ ...d, [key]: e.target.value.split(",").map(x => x.trim()).filter(Boolean) }))}
+        placeholder={ph} style={fld} />
+    </label>
+  );
+  const saveInterests = () => { onSaveConfig(draft); setEditing(false); onRegenerate(); };
+  const renderLinks = (obj, heading) => {
+    const keys = Object.keys(obj || {}).filter(q => obj[q] && obj[q].length);
+    if (!keys.length) return null;
+    return (
+      <div style={{ marginTop: 16 }}>
+        <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: 1, color: "#7f97ab", marginBottom: 4 }}>{heading}</div>
+        {keys.map(q => (
+          <div key={q} style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 12, color: "#8fa6b8" }}>{q}</div>
+            {obj[q].slice(0, 4).map((it, i) => (
+              <a key={i} href={it.url} target="_blank" rel="noreferrer" style={{ display: "block", color: "#BFD4E6", fontSize: 13, textDecoration: "none", padding: "3px 0" }}>• {it.title}</a>
+            ))}
+          </div>
+        ))}
+      </div>
+    );
+  };
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "linear-gradient(160deg,#0f1c27,#1B2C3A 55%,#243746)", color: "#EAF0F5", overflowY: "auto" }}>
+      <div style={{ maxWidth: 620, margin: "0 auto", padding: "40px 22px 60px", boxSizing: "border-box" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+          <Sun size={26} color="#F0C05A" style={{ marginTop: 4, flexShrink: 0 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12, color: "#8fa6b8", textTransform: "uppercase", letterSpacing: 1 }}>{today}</div>
+            <h1 style={{ fontFamily: "Georgia,serif", fontSize: 30, margin: "2px 0 0" }}>{report ? report.greeting : "Good morning, " + userName}</h1>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#8fa6b8", cursor: "pointer", flexShrink: 0 }}><X size={22} /></button>
+        </div>
+
+        {loading && (
+          <div style={{ marginTop: 34, textAlign: "center", color: "#9fb4c6" }}>
+            <div style={{ fontSize: 15 }}>Putting your briefing together…</div>
+            <div style={{ fontSize: 12, marginTop: 6 }}>Pulling your news, research, and verse.</div>
+          </div>
+        )}
+
+        {!loading && report && report.needsBackend && (
+          <div style={{ marginTop: 22, background: "#12202c", border: "1px solid #33475a", borderRadius: 12, padding: 16, fontSize: 14 }}>
+            Connect your backend in Settings to enable the live morning report. You can still set your interests below.
+          </div>
+        )}
+        {!loading && report && report.error && (
+          <div style={{ marginTop: 22, background: "#2a1c1c", border: "1px solid #5a3333", borderRadius: 12, padding: 16, fontSize: 14 }}>
+            Couldn't build today's report: {report.error}. Try Refresh, or edit interests below.
+          </div>
+        )}
+
+        {!loading && report && report.verse && (
+          <div style={{ marginTop: 22, background: "rgba(240,192,90,0.08)", border: "1px solid rgba(240,192,90,0.35)", borderRadius: 12, padding: "16px 18px" }}>
+            <div style={{ fontFamily: "Georgia,serif", fontSize: 17, lineHeight: 1.5, fontStyle: "italic" }}>&ldquo;{report.verse.text}&rdquo;</div>
+            <div style={{ fontSize: 13, color: "#F0C05A", marginTop: 8 }}>&mdash; {report.verse.reference}</div>
+          </div>
+        )}
+
+        {!loading && report && report.brief && (
+          <div style={{ marginTop: 22, fontSize: 15, lineHeight: 1.65, whiteSpace: "pre-wrap" }}>{report.brief}</div>
+        )}
+
+        {!loading && report && renderLinks(report.news, "In the news")}
+        {!loading && report && renderLinks(report.research, "Research")}
+
+        <div style={{ marginTop: 26, borderTop: "1px solid #33475a", paddingTop: 16 }}>
+          <button onClick={() => setEditing(v => !v)} style={{ background: "none", border: "1px solid #4a5a6a", color: "#BFD4E6", borderRadius: 8, padding: "7px 12px", fontSize: 13, cursor: "pointer" }}>
+            {editing ? "Hide interests" : "Edit my interests"}
+          </button>
+          {!loading && <button onClick={onRegenerate} style={{ marginLeft: 8, background: "none", border: "1px solid #4a5a6a", color: "#BFD4E6", borderRadius: 8, padding: "7px 12px", fontSize: 13, cursor: "pointer" }}>Refresh</button>}
+          {editing && (
+            <div style={{ marginTop: 14, background: "#12202c", border: "1px solid #33475a", borderRadius: 12, padding: 16 }}>
+              {listInput("News topics or places (comma-separated)", "news", "e.g. Austin, Malta, Nebraska football")}
+              {listInput("Research topics (comma-separated)", "research", "e.g. education, child psychology")}
+              <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, fontSize: 14, cursor: "pointer" }}>
+                <input type="checkbox" checked={draft.bible !== false} onChange={e => setDraft(d => ({ ...d, bible: e.target.checked }))} /> Include a daily Bible verse
+              </label>
+              <label style={{ display: "block", fontSize: 12, color: "#9fb4c6", marginTop: 12 }}>Anything else (custom request)
+                <textarea value={draft.custom || ""} onChange={e => setDraft(d => ({ ...d, custom: e.target.value }))} rows={2}
+                  placeholder="e.g. a motivational quote, a fun fact about space"
+                  style={{ ...fld, resize: "vertical" }} />
+              </label>
+              <button onClick={saveInterests} style={{ marginTop: 12, background: "#C9603C", color: "#fff", border: "none", borderRadius: 8, padding: "9px 16px", fontSize: 14, cursor: "pointer" }}>Save &amp; refresh</button>
+            </div>
+          )}
+        </div>
+
+        <button onClick={onClose} style={{ marginTop: 28, width: "100%", background: "#C9603C", color: "#fff", border: "none", borderRadius: 10, padding: "14px", fontSize: 16, cursor: "pointer" }}>
+          Enter the ledger &rarr;
+        </button>
+      </div>
     </div>
   );
 }
